@@ -1,0 +1,6 @@
+{
+  "name": "StockPulse Inventory Analytics",
+  "description": "Real-time non-ferrous metal manufacturing inventory accuracy dashboard with live telemetry, authentication, and drag-and-drop widgets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
