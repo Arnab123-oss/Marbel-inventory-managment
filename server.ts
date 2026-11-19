@@ -1219,7 +1219,7 @@ setInterval(() => {
 
 async function startServer() {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({limit: '10mb'}));
 
   // --- Auth Routes ---
   app.get('/api/auth/me', (req: Request, res: Response) => {
@@ -1479,6 +1479,7 @@ async function startServer() {
       unit,
       qty,
       unitPriceInr,
+      imageUrl,
     } = req.body as {
       itemCode?: string;
       itemName?: string;
@@ -1490,6 +1491,7 @@ async function startServer() {
       unit?: UnitType;
       qty?: number;
       unitPriceInr?: number;
+      imageUrl?: string;
     };
     if (
       !itemCode?.trim() ||
@@ -1542,6 +1544,8 @@ async function startServer() {
       unitPriceInr: unitPriceInr || 450,
       status: qty === 0 ? 'Out of Stock' : 'In Stock',
       lastCountedAt: 'Added just now',
+      imageUrl: imageUrl?.trim() || undefined,
+      enabled: true,
     };
     store.snapshot.varianceItems = [newItem, ...store.snapshot.varianceItems];
     loc.totalItems += 1;
@@ -1578,8 +1582,17 @@ async function startServer() {
       res.status(404).json({error: 'Product not found.'});
       return;
     }
-    const {itemName, dimensions, category, finish, thickness, locationId, unitPriceInr} =
-      req.body as Partial<VarianceItem>;
+    const {
+      itemName,
+      dimensions,
+      category,
+      finish,
+      thickness,
+      locationId,
+      unitPriceInr,
+      imageUrl,
+      enabled,
+    } = req.body as Partial<VarianceItem>;
 
     if (itemName?.trim()) item.itemName = itemName.trim();
     if (dimensions?.trim()) item.dimensions = dimensions.trim();
@@ -1588,6 +1601,12 @@ async function startServer() {
     if (thickness?.trim()) item.thickness = thickness.trim();
     if (typeof unitPriceInr === 'number' && unitPriceInr > 0) {
       item.unitPriceInr = Math.round(unitPriceInr);
+    }
+    if (imageUrl !== undefined) {
+      item.imageUrl = imageUrl.trim() || undefined;
+    }
+    if (typeof enabled === 'boolean') {
+      item.enabled = enabled;
     }
     if (locationId) {
       const loc = store.snapshot.locations.find((l) => l.id === locationId);
@@ -1615,6 +1634,86 @@ async function startServer() {
     saveStore();
     broadcastSnapshot();
     res.json({item, snapshot: store.snapshot});
+  });
+
+  app.patch('/api/inventory/products/:id/toggle', requireAuth, (req: Request, res: Response) => {
+    const item = store.snapshot.varianceItems.find((i) => i.id === req.params.id);
+    if (!item) {
+      res.status(404).json({error: 'Product not found.'});
+      return;
+    }
+    const nextEnabled = item.enabled === false;
+    item.enabled = nextEnabled;
+
+    pushHistory({
+      itemId: item.id,
+      itemCode: item.itemCode,
+      type: 'Adjustment',
+      referenceNo: `${nextEnabled ? 'ENB' : 'DSB'}-${item.itemCode}`,
+      quantityDelta: 0,
+      unit: item.unit,
+      systemAfter: item.systemQty,
+      physicalAfter: item.physicalQty,
+      branchName: item.locationName,
+      partyOrNote: `Product ${nextEnabled ? 'enabled' : 'disabled'} in catalog`,
+      timestampLabel: 'Just now',
+    });
+
+    store.snapshot.lastUpdatedAt = new Date().toISOString();
+    saveStore();
+    broadcastSnapshot();
+    res.json({item, snapshot: store.snapshot});
+  });
+
+  app.delete('/api/inventory/products/:id', requireAuth, (req: Request, res: Response) => {
+    const idx = store.snapshot.varianceItems.findIndex((i) => i.id === req.params.id);
+    if (idx === -1) {
+      res.status(404).json({error: 'Product not found.'});
+      return;
+    }
+    const [removed] = store.snapshot.varianceItems.splice(idx, 1);
+    const loc = store.snapshot.locations.find((l) => l.id === removed.locationId);
+    if (loc) {
+      loc.totalItems = Math.max(0, loc.totalItems - 1);
+      if (removed.unit === 'sq. ft') loc.sqftQty = Math.max(0, loc.sqftQty - removed.physicalQty);
+      if (removed.unit === 'pcs') loc.pcsQty = Math.max(0, loc.pcsQty - removed.physicalQty);
+      if (removed.unit === 'box') loc.boxQty = Math.max(0, loc.boxQty - removed.physicalQty);
+    }
+    store.snapshot.kpis.totalProducts = Math.max(0, store.snapshot.kpis.totalProducts - 1);
+    store.snapshot.stockStatus.totalItems = Math.max(
+      0,
+      store.snapshot.stockStatus.totalItems - 1,
+    );
+    if (removed.status === 'In Stock') {
+      store.snapshot.stockStatus.inStockCount = Math.max(
+        0,
+        store.snapshot.stockStatus.inStockCount - 1,
+      );
+    } else if (removed.status === 'Low Stock') {
+      store.snapshot.stockStatus.lowStockCount = Math.max(
+        0,
+        store.snapshot.stockStatus.lowStockCount - 1,
+      );
+    } else if (removed.status === 'Out of Stock') {
+      store.snapshot.stockStatus.outOfStockCount = Math.max(
+        0,
+        store.snapshot.stockStatus.outOfStockCount - 1,
+      );
+    } else if (removed.status === 'Overstock') {
+      store.snapshot.stockStatus.overstockCount = Math.max(
+        0,
+        store.snapshot.stockStatus.overstockCount - 1,
+      );
+    }
+
+    store.snapshot.lastUpdatedAt = new Date().toISOString();
+    saveStore();
+    broadcastSnapshot();
+    res.json({
+      deletedId: removed.id,
+      itemCode: removed.itemCode,
+      snapshot: store.snapshot,
+    });
   });
 
   app.post('/api/inventory/slabs', requireAuth, (req: Request, res: Response) => {

@@ -6,9 +6,15 @@ import {
   PackageCheck,
   ShoppingCart,
   SlidersHorizontal,
+  Upload,
   X,
 } from 'lucide-react';
-import {useEffect, useMemo, useState} from 'react';
+import {useEffect, useMemo, useRef, useState} from 'react';
+import {
+  compressImageFileToDataUrl,
+  DEFAULT_PRODUCT_IMAGE,
+  resolveProductImage,
+} from '../../constants/assets';
 import type {
   LocationRow,
   ProductHistoryEntry,
@@ -39,6 +45,7 @@ interface ProductActionModalProps {
       thickness: string;
       locationId: string;
       unitPriceInr: number;
+      imageUrl?: string;
     },
   ) => Promise<void>;
   onUpdateSlabLot: (
@@ -86,6 +93,8 @@ export function ProductActionModal({
   const [pThick, setPThick] = useState('');
   const [pLocId, setPLocId] = useState('');
   const [pPrice, setPPrice] = useState('');
+  const [pImageUrl, setPImageUrl] = useState('');
+  const editFileRef = useRef<HTMLInputElement | null>(null);
 
   // Slab edit fields
   const [sStone, setSStone] = useState('');
@@ -111,6 +120,7 @@ export function ProductActionModal({
       setPThick(it.thickness);
       setPLocId(it.locationId);
       setPPrice(String(it.unitPriceInr));
+      setPImageUrl(it.imageUrl || '');
     } else {
       const sl = target.slab;
       setSStone(sl.stoneName);
@@ -159,6 +169,7 @@ export function ProductActionModal({
           thickness: pThick.trim(),
           locationId: pLocId,
           unitPriceInr: Number(pPrice) || target.item.unitPriceInr,
+          imageUrl: pImageUrl,
         });
       } else {
         await onUpdateSlabLot(target.slab.id, {
@@ -193,17 +204,30 @@ export function ProductActionModal({
         className="relative z-10 w-full max-w-2xl bg-white rounded-xl border border-[#E5E9F0] shadow-xl flex flex-col max-h-[90vh] overflow-hidden"
       >
         <div className="px-6 py-4 border-b border-[#E5E9F0] flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-[11.5px] font-mono text-[#2563EB] font-semibold">
-              <span>{code}</span>
-              <span className="text-[#CBD5E1]">·</span>
-              <span className="font-sans text-[#64748B] font-medium">
-                {category}
-              </span>
+          <div className="flex items-center gap-3.5 min-w-0">
+            <img
+              src={resolveProductImage(
+                target.kind === 'product' ? target.item.imageUrl : target.slab.imageUrl,
+              )}
+              alt={title}
+              referrerPolicy="no-referrer"
+              onError={(e) => {
+                e.currentTarget.src = DEFAULT_PRODUCT_IMAGE;
+              }}
+              className="w-12 h-12 rounded-lg object-cover border border-[#E5E9F0] bg-slate-50 shrink-0"
+            />
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-[11.5px] font-mono text-[#2563EB] font-semibold">
+                <span>{code}</span>
+                <span className="text-[#CBD5E1]">·</span>
+                <span className="font-sans text-[#64748B] font-medium">
+                  {category}
+                </span>
+              </div>
+              <h3 className="text-[17px] font-bold text-[#0F172A] truncate mt-0.5">
+                {title}
+              </h3>
             </div>
-            <h3 className="text-[17px] font-bold text-[#0F172A] truncate mt-0.5">
-              {title}
-            </h3>
           </div>
           <button
             type="button"
@@ -526,6 +550,60 @@ export function ProductActionModal({
                       onChange={(e) => setPPrice(e.target.value)}
                       className="w-full h-9 px-2.5 text-[12.5px] rounded-lg border border-[#E2E8F0] tabular-nums"
                     />
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-lg bg-[#FAFBFD] border border-[#E5E9F0] flex items-center gap-3.5">
+                <img
+                  src={resolveProductImage(pImageUrl)}
+                  alt={pName || 'Product preview'}
+                  referrerPolicy="no-referrer"
+                  onError={(e) => {
+                    e.currentTarget.src = DEFAULT_PRODUCT_IMAGE;
+                  }}
+                  className="w-14 h-14 rounded-lg object-cover border border-[#E2E8F0] bg-white shrink-0"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="text-[11.5px] font-semibold text-[#0F172A]">Product Image</div>
+                  <div className="text-[11px] text-[#64748B] mt-0.5">
+                    {pImageUrl
+                      ? 'Custom product photo attached'
+                      : 'Using fixed default stone image'}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <label className="h-7 px-2.5 rounded-md border border-[#E2E8F0] bg-white hover:bg-slate-50 text-[11.5px] font-medium text-[#334155] inline-flex items-center gap-1.5 cursor-pointer">
+                      <Upload className="w-3.5 h-3.5 text-[#2563EB]" />
+                      <span>Change Image</span>
+                      <input
+                        ref={editFileRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          try {
+                            const dataUrl = await compressImageFileToDataUrl(file);
+                            setPImageUrl(dataUrl);
+                          } catch {
+                            setErrorMsg('Unable to process selected image.');
+                          }
+                        }}
+                      />
+                    </label>
+                    {pImageUrl && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPImageUrl('');
+                          if (editFileRef.current) editFileRef.current.value = '';
+                        }}
+                        className="h-7 px-2.5 rounded-md text-[11.5px] font-medium text-[#64748B] hover:text-[#DC2626] hover:bg-rose-50"
+                      >
+                        Use Default
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

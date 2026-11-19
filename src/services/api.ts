@@ -87,6 +87,7 @@ export const api = {
     unit: UnitType;
     qty: number;
     unitPriceInr: number;
+    imageUrl?: string;
   }) =>
     requestJson<{item: VarianceItem; snapshot: InventorySnapshot}>('/api/inventory/products', {
       method: 'POST',
@@ -103,6 +104,7 @@ export const api = {
       thickness: string;
       locationId: string;
       unitPriceInr: number;
+      imageUrl?: string;
     },
   ) =>
     requestJson<{item: VarianceItem; snapshot: InventorySnapshot}>(
@@ -110,6 +112,22 @@ export const api = {
       {
         method: 'PUT',
         body: JSON.stringify(payload),
+      },
+    ),
+
+  toggleProductEnabled: (itemId: string) =>
+    requestJson<{item: VarianceItem; snapshot: InventorySnapshot}>(
+      `/api/inventory/products/${itemId}/toggle`,
+      {
+        method: 'PATCH',
+      },
+    ),
+
+  deleteProduct: (itemId: string) =>
+    requestJson<{deletedId: string; itemCode: string; snapshot: InventorySnapshot}>(
+      `/api/inventory/products/${itemId}`,
+      {
+        method: 'DELETE',
       },
     ),
 

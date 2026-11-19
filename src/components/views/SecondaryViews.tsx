@@ -10,8 +10,16 @@ import {
   Plus,
   RotateCcw,
   Search,
+  Trash2,
+  Upload,
+  X,
 } from 'lucide-react';
-import {useMemo, useState} from 'react';
+import {useMemo, useRef, useState} from 'react';
+import {
+  compressImageFileToDataUrl,
+  DEFAULT_PRODUCT_IMAGE,
+  resolveProductImage,
+} from '../../constants/assets';
 import type {
   CustomerRecord,
   InventorySnapshot,
@@ -37,7 +45,6 @@ interface SecondaryViewsProps {
   liveStreamEnabled: boolean;
   onToggleLiveStream: () => void;
   onSelectLocation: (loc: LocationRow) => void;
-  onReconcileItem: (itemId: string, newPhysicalQty: number, reason: string) => Promise<void>;
   onCreateProduct: (payload: {
     itemCode: string;
     itemName: string;
@@ -49,6 +56,7 @@ interface SecondaryViewsProps {
     unit: UnitType;
     qty: number;
     unitPriceInr: number;
+    imageUrl?: string;
   }) => Promise<void>;
   onUpdateProduct: (
     itemId: string,
@@ -60,8 +68,11 @@ interface SecondaryViewsProps {
       thickness: string;
       locationId: string;
       unitPriceInr: number;
+      imageUrl?: string;
     },
   ) => Promise<void>;
+  onToggleProductEnabled: (itemId: string) => Promise<void>;
+  onDeleteProduct: (itemId: string) => Promise<void>;
   onCreateSlabLot: (payload: {
     stoneName: string;
     category: StoneCategory;
@@ -151,9 +162,10 @@ export function SecondaryViews({
   liveStreamEnabled,
   onToggleLiveStream,
   onSelectLocation,
-  onReconcileItem,
   onCreateProduct,
   onUpdateProduct,
+  onToggleProductEnabled,
+  onDeleteProduct,
   onCreateSlabLot,
   onUpdateSlabLot,
   onCreatePurchaseBill,
@@ -187,7 +199,15 @@ export function SecondaryViews({
   const [prodUnit, setProdUnit] = useState<UnitType>('sq. ft');
   const [prodQty, setProdQty] = useState('1600');
   const [prodPrice, setProdPrice] = useState('680');
+  const [prodImageUrl, setProdImageUrl] = useState('');
+  const [prodImageLoading, setProdImageLoading] = useState(false);
   const [prodError, setProdError] = useState<string | null>(null);
+  const prodFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Product toggle & delete confirmation state
+  const [togglingProductId, setTogglingProductId] = useState<string | null>(null);
+  const [deleteConfirmItem, setDeleteConfirmItem] = useState<VarianceItem | null>(null);
+  const [deletingProduct, setDeletingProduct] = useState(false);
 
   // Slab lot creation state
   const [slabStone, setSlabStone] = useState('Statuario Venato');
@@ -240,12 +260,6 @@ export function SecondaryViews({
   const [supSpecialty, setSupSpecialty] = useState('Italian Marble Slabs (sq. ft)');
   const [supPhone, setSupPhone] = useState('');
 
-  // Quick reconcile inline
-  const [reconcileTarget, setReconcileTarget] = useState<VarianceItem>(snapshot.varianceItems[0]);
-  const [reconcileQty, setReconcileQty] = useState(
-    String(snapshot.varianceItems[0]?.physicalQty || 0),
-  );
-
   const filteredItems = useMemo(() => {
     const q = skuSearch.trim().toLowerCase();
     return snapshot.varianceItems.filter((item) => {
@@ -288,18 +302,8 @@ export function SecondaryViews({
     setActionMode(mode);
   }
 
-  const syncedReconcileTarget =
-    snapshot.varianceItems.find((i) => i.id === reconcileTarget?.id) ||
-    snapshot.varianceItems[0];
-
   function renderMainSection() {
     if (section === 'inventory') {
-      const parsedPreviewPhys = Number(reconcileQty);
-      const previewVariance =
-        syncedReconcileTarget && !Number.isNaN(parsedPreviewPhys)
-          ? Math.round(parsedPreviewPhys) - syncedReconcileTarget.systemQty
-          : 0;
-
       return (
         <div className="space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-4">
@@ -462,14 +466,16 @@ export function SecondaryViews({
 
               {inventoryTab === 'quantity' ? (
                 <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse min-w-[1040px]">
+                  <table className="w-full text-left border-collapse min-w-[1160px]">
                     <thead>
                       <tr className="border-b border-[#E5E9F0] text-[11.5px] font-medium text-[#64748B]">
-                        <th className="py-2.5 pr-3">Code</th>
+                        <th className="py-2.5 pr-3">Image</th>
+                        <th className="py-2.5 px-3">Code</th>
                         <th className="py-2.5 px-3">Product</th>
                         <th className="py-2.5 px-3">Location</th>
                         <th className="py-2.5 px-3">Category</th>
                         <th className="py-2.5 px-3">Dimensions</th>
+                        <th className="py-2.5 px-3">Thickness</th>
                         <th className="py-2.5 px-3">Unit</th>
                         <th className="py-2.5 px-3 text-right">System Stock</th>
                         <th className="py-2.5 px-3 text-right">Physical Stock</th>
@@ -482,24 +488,35 @@ export function SecondaryViews({
                       {filteredItems.map((item) => {
                         const isNeg = item.variance < 0;
                         const isPos = item.variance > 0;
+                        const isDisabled = item.enabled === false;
                         return (
                           <tr
                             key={item.id}
-                            onClick={() => {
-                              setReconcileTarget(item);
-                              setReconcileQty(String(item.physicalQty));
-                            }}
-                            className={`cursor-pointer transition-colors ${
-                              syncedReconcileTarget?.id === item.id
-                                ? 'bg-blue-50/70'
-                                : 'hover:bg-slate-50/80'
+                            className={`hover:bg-slate-50/80 transition-colors ${
+                              isDisabled ? 'opacity-60' : ''
                             }`}
                           >
-                            <td className="py-3 pr-3 font-mono font-medium text-[#0F172A] whitespace-nowrap">
+                            <td className="py-2.5 pr-3 whitespace-nowrap">
+                              <img
+                                src={resolveProductImage(item.imageUrl)}
+                                alt={item.itemName}
+                                referrerPolicy="no-referrer"
+                                onError={(e) => {
+                                  e.currentTarget.src = DEFAULT_PRODUCT_IMAGE;
+                                }}
+                                className="w-10 h-10 rounded-lg object-cover border border-[#E5E9F0] bg-slate-50"
+                              />
+                            </td>
+                            <td className="py-3 px-3 font-mono font-medium text-[#0F172A] whitespace-nowrap">
                               {item.itemCode}
                             </td>
                             <td className="py-3 px-3 font-medium text-[#1E293B] whitespace-nowrap">
-                              {item.itemName}
+                              <div>{item.itemName}</div>
+                              {isDisabled && (
+                                <div className="text-[10.5px] font-medium text-[#94A3B8]">
+                                  Disabled
+                                </div>
+                              )}
                             </td>
                             <td className="py-3 px-3 text-[#475569] whitespace-nowrap">
                               {item.locationName}
@@ -509,6 +526,9 @@ export function SecondaryViews({
                             </td>
                             <td className="py-3 px-3 font-mono text-[12px] text-[#334155] whitespace-nowrap">
                               {item.dimensions}
+                            </td>
+                            <td className="py-3 px-3 font-mono text-[12px] text-[#475569] whitespace-nowrap">
+                              {item.thickness}
                             </td>
                             <td className="py-3 px-3 font-medium text-[#2563EB] whitespace-nowrap">
                               {item.unit}
@@ -546,10 +566,7 @@ export function SecondaryViews({
                             >
                               {item.status}
                             </td>
-                            <td
-                              className="py-3 pl-3 text-right whitespace-nowrap"
-                              onClick={(e) => e.stopPropagation()}
-                            >
+                            <td className="py-3 pl-3 text-right whitespace-nowrap">
                               <RowActionMenu
                                 ariaLabel={`Actions for ${item.itemCode}`}
                                 onSelect={(mode) => openProductAction(item, mode)}
@@ -563,13 +580,15 @@ export function SecondaryViews({
                 </div>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse min-w-[760px]">
+                  <table className="w-full text-left border-collapse min-w-[880px]">
                     <thead>
                       <tr className="border-b border-[#E5E9F0] text-[11.5px] font-medium text-[#64748B]">
-                        <th className="py-2.5 pr-3">Slab ID</th>
+                        <th className="py-2.5 pr-3">Image</th>
+                        <th className="py-2.5 px-3">Slab ID</th>
                         <th className="py-2.5 px-3">Product</th>
                         <th className="py-2.5 px-3">Category</th>
                         <th className="py-2.5 px-3">Dimensions</th>
+                        <th className="py-2.5 px-3">Thickness</th>
                         <th className="py-2.5 px-3">Branch</th>
                         <th className="py-2.5 px-3 text-right">Area (sq. ft)</th>
                         <th className="py-2.5 px-3 text-right">Status</th>
@@ -579,7 +598,18 @@ export function SecondaryViews({
                     <tbody className="divide-y divide-[#F1F5F9] text-[12.5px]">
                       {filteredSlabs.map((slab) => (
                         <tr key={slab.id} className="hover:bg-slate-50/80 transition-colors">
-                          <td className="py-3 pr-3 font-mono font-semibold text-[#0F172A] whitespace-nowrap">
+                          <td className="py-2.5 pr-3 whitespace-nowrap">
+                            <img
+                              src={resolveProductImage(slab.imageUrl)}
+                              alt={slab.stoneName}
+                              referrerPolicy="no-referrer"
+                              onError={(e) => {
+                                e.currentTarget.src = DEFAULT_PRODUCT_IMAGE;
+                              }}
+                              className="w-10 h-10 rounded-lg object-cover border border-[#E5E9F0] bg-slate-50"
+                            />
+                          </td>
+                          <td className="py-3 px-3 font-mono font-semibold text-[#0F172A] whitespace-nowrap">
                             {slab.lotNumber}
                           </td>
                           <td className="py-3 px-3 font-medium text-[#1E293B]">
@@ -590,6 +620,9 @@ export function SecondaryViews({
                           </td>
                           <td className="py-3 px-3 font-mono text-[12px] text-[#334155] whitespace-nowrap">
                             {slab.dimensionsFt}
+                          </td>
+                          <td className="py-3 px-3 font-mono text-[12px] text-[#475569] whitespace-nowrap">
+                            {slab.thicknessMm} mm
                           </td>
                           <td className="py-3 px-3 text-[#475569] whitespace-nowrap">
                             {slab.branchName}
@@ -625,78 +658,7 @@ export function SecondaryViews({
             </div>
 
             <div className="space-y-4">
-              <form
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  if (!syncedReconcileTarget) return;
-                  await onReconcileItem(
-                    syncedReconcileTarget.id,
-                    Number(reconcileQty),
-                    'Physical stock count verified',
-                  );
-                }}
-                className="bg-white border border-[#E5E9F0] rounded-xl p-5 space-y-3.5"
-              >
-                <h2 className="text-[14px] font-semibold text-[#0F172A]">
-                  Physical Stock Reconciliation
-                </h2>
-                {syncedReconcileTarget && (
-                  <>
-                    <div className="text-[12px] text-[#475569]">
-                      <div className="font-semibold text-[#0F172A]">
-                        {syncedReconcileTarget.itemName}
-                      </div>
-                      <div className="font-mono text-[11.5px] text-[#2563EB] mt-0.5">
-                        {syncedReconcileTarget.dimensions} · {syncedReconcileTarget.category}
-                      </div>
-                      <div className="mt-1 grid grid-cols-2 gap-2 pt-2 border-t border-[#F1F5F9] tabular-nums">
-                        <div>
-                          <div className="text-[10.5px] text-[#64748B]">System Stock</div>
-                          <div className="font-semibold text-[#0F172A]">
-                            {syncedReconcileTarget.systemQty.toLocaleString('en-IN')}{' '}
-                            {syncedReconcileTarget.unit}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-[10.5px] text-[#64748B]">Variance (Phys − Sys)</div>
-                          <div
-                            className={`font-semibold ${
-                              previewVariance < 0
-                                ? 'text-[#DC2626]'
-                                : previewVariance > 0
-                                  ? 'text-[#16A34A]'
-                                  : 'text-[#0F172A]'
-                            }`}
-                          >
-                            {previewVariance > 0 ? `+${previewVariance}` : previewVariance}{' '}
-                            {syncedReconcileTarget.unit}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-medium text-[#64748B] mb-1">
-                        Physical Stock ({syncedReconcileTarget.unit})
-                      </label>
-                      <input
-                        type="number"
-                        min={0}
-                        value={reconcileQty}
-                        onChange={(e) => setReconcileQty(e.target.value)}
-                        className="w-full h-9 px-3 text-[12.5px] rounded-lg border border-[#E2E8F0] tabular-nums"
-                      />
-                    </div>
-                    <button
-                      type="submit"
-                      className="w-full h-9 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[12.5px] font-semibold"
-                    >
-                      Save Physical Count
-                    </button>
-                  </>
-                )}
-              </form>
-
-              <div className="bg-white border border-[#E5E9F0] rounded-xl p-5 space-y-2.5">
+              <div className="bg-white border border-[#E5E9F0] rounded-xl p-5 space-y-2.5 h-fit">
                 <h3 className="text-[13.5px] font-semibold text-[#0F172A]">
                   Open Stock Alerts
                 </h3>
@@ -761,7 +723,10 @@ export function SecondaryViews({
                     unit: prodUnit,
                     qty: Number(prodQty),
                     unitPriceInr: Number(prodPrice),
+                    imageUrl: prodImageUrl || undefined,
                   });
+                  setProdImageUrl('');
+                  if (prodFileInputRef.current) prodFileInputRef.current.value = '';
                 } catch (err) {
                   setProdError(
                     err instanceof Error ? err.message : 'Unable to add product variant',
@@ -926,6 +891,74 @@ export function SecondaryViews({
                   ))}
                 </select>
               </div>
+              <div>
+                <label className="block text-[11px] font-medium text-[#64748B] mb-1.5">
+                  Product Image
+                </label>
+                <div className="flex items-center gap-3 p-2.5 rounded-lg border border-[#E2E8F0] bg-[#FAFBFD]">
+                  <img
+                    src={resolveProductImage(prodImageUrl)}
+                    alt="Product preview"
+                    referrerPolicy="no-referrer"
+                    onError={(e) => {
+                      e.currentTarget.src = DEFAULT_PRODUCT_IMAGE;
+                    }}
+                    className="w-14 h-14 rounded-lg object-cover border border-[#E5E9F0] bg-white shrink-0"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label className="h-8 px-3 rounded-lg border border-[#E2E8F0] bg-white hover:bg-slate-50 text-[12px] font-medium text-[#0F172A] inline-flex items-center gap-1.5 cursor-pointer transition-colors">
+                        <Upload className="w-3.5 h-3.5 text-[#2563EB]" />
+                        <span>
+                          {prodImageLoading
+                            ? 'Processing...'
+                            : prodImageUrl
+                              ? 'Change Image'
+                              : 'Upload Image'}
+                        </span>
+                        <input
+                          ref={prodFileInputRef}
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            if (!file) return;
+                            setProdError(null);
+                            setProdImageLoading(true);
+                            try {
+                              const compressed = await compressImageFileToDataUrl(file);
+                              setProdImageUrl(compressed);
+                            } catch {
+                              setProdError('Could not read the selected image file.');
+                            } finally {
+                              setProdImageLoading(false);
+                            }
+                          }}
+                        />
+                      </label>
+                      {prodImageUrl && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProdImageUrl('');
+                            if (prodFileInputRef.current) prodFileInputRef.current.value = '';
+                          }}
+                          className="h-8 px-2 rounded-lg text-[11.5px] font-medium text-[#64748B] hover:text-[#DC2626] hover:bg-rose-50 inline-flex items-center gap-1"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                          <span>Reset</span>
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-[#64748B] mt-1">
+                      {prodImageUrl
+                        ? 'Custom product image selected'
+                        : 'Optional — uses fixed default stone image if not uploaded'}
+                    </p>
+                  </div>
+                </div>
+              </div>
               {prodError && (
                 <div className="px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-[12px] text-[#DC2626]">
                   {prodError}
@@ -933,7 +966,8 @@ export function SecondaryViews({
               )}
               <button
                 type="submit"
-                className="w-full h-9 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[12.5px] font-semibold"
+                disabled={prodImageLoading}
+                className="w-full h-9 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[12.5px] font-semibold disabled:opacity-60"
               >
                 Add Product Variant
               </button>
@@ -944,14 +978,16 @@ export function SecondaryViews({
                 Active Shop Products ({snapshot.varianceItems.length})
               </h2>
               <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse min-w-[860px]">
+                <table className="w-full text-left border-collapse min-w-[1040px]">
                   <thead>
                     <tr className="border-b border-[#E5E9F0] text-[11px] font-medium text-[#64748B]">
-                      <th className="py-2 pr-2">SKU</th>
+                      <th className="py-2 pr-2">Image</th>
+                      <th className="py-2 px-2">SKU</th>
                       <th className="py-2 px-2">Product</th>
                       <th className="py-2 px-2">Location</th>
                       <th className="py-2 px-2">Category</th>
                       <th className="py-2 px-2">Dimensions</th>
+                      <th className="py-2 px-2">Thickness</th>
                       <th className="py-2 px-2 text-right">System</th>
                       <th className="py-2 px-2 text-right">Physical</th>
                       <th className="py-2 px-2 text-right">Variance</th>
@@ -959,48 +995,149 @@ export function SecondaryViews({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#F1F5F9] text-[12px]">
-                    {snapshot.varianceItems.map((item) => (
-                      <tr key={item.id} className="hover:bg-slate-50/80">
-                        <td className="py-2.5 pr-2 font-mono font-medium whitespace-nowrap">
-                          {item.itemCode}
-                        </td>
-                        <td className="py-2.5 px-2 font-medium text-[#0F172A] whitespace-nowrap">
-                          {item.itemName}
-                        </td>
-                        <td className="py-2.5 px-2 text-[#475569] whitespace-nowrap">
-                          {item.locationName}
-                        </td>
-                        <td className="py-2.5 px-2 font-medium text-[#334155] whitespace-nowrap">
-                          {item.category}
-                        </td>
-                        <td className="py-2.5 px-2 font-mono text-[11.5px] text-[#2563EB] whitespace-nowrap">
-                          {item.dimensions}
-                        </td>
-                        <td className="py-2.5 px-2 text-right tabular-nums whitespace-nowrap">
-                          {item.systemQty.toLocaleString('en-IN')} {item.unit}
-                        </td>
-                        <td className="py-2.5 px-2 text-right font-semibold tabular-nums whitespace-nowrap">
-                          {item.physicalQty.toLocaleString('en-IN')} {item.unit}
-                        </td>
-                        <td
-                          className={`py-2.5 px-2 text-right font-semibold tabular-nums whitespace-nowrap ${
-                            item.variance < 0
-                              ? 'text-[#DC2626]'
-                              : item.variance > 0
-                                ? 'text-[#16A34A]'
-                                : 'text-[#64748B]'
+                    {snapshot.varianceItems.map((item) => {
+                      const isEnabled = item.enabled !== false;
+                      const isToggling = togglingProductId === item.id;
+                      return (
+                        <tr
+                          key={item.id}
+                          className={`transition-colors ${
+                            isEnabled ? 'hover:bg-slate-50/80' : 'bg-slate-50/60'
                           }`}
                         >
-                          {item.variance > 0 ? `+${item.variance}` : item.variance}
-                        </td>
-                        <td className="py-2.5 pl-2 text-right whitespace-nowrap">
-                          <RowActionMenu
-                            ariaLabel={`Actions for ${item.itemCode}`}
-                            onSelect={(mode) => openProductAction(item, mode)}
-                          />
-                        </td>
-                      </tr>
-                    ))}
+                          <td className={`py-2.5 pr-2 whitespace-nowrap ${!isEnabled ? 'opacity-55' : ''}`}>
+                            <img
+                              src={resolveProductImage(item.imageUrl)}
+                              alt={item.itemName}
+                              referrerPolicy="no-referrer"
+                              onError={(e) => {
+                                e.currentTarget.src = DEFAULT_PRODUCT_IMAGE;
+                              }}
+                              className="w-10 h-10 rounded-lg object-cover border border-[#E5E9F0] bg-slate-50"
+                            />
+                          </td>
+                          <td
+                            className={`py-2.5 px-2 font-mono font-medium whitespace-nowrap ${
+                              !isEnabled ? 'text-[#94A3B8]' : 'text-[#0F172A]'
+                            }`}
+                          >
+                            {item.itemCode}
+                          </td>
+                          <td
+                            className={`py-2.5 px-2 font-medium whitespace-nowrap ${
+                              !isEnabled ? 'text-[#94A3B8] line-through' : 'text-[#0F172A]'
+                            }`}
+                          >
+                            {item.itemName}
+                          </td>
+                          <td
+                            className={`py-2.5 px-2 whitespace-nowrap ${
+                              !isEnabled ? 'text-[#94A3B8]' : 'text-[#475569]'
+                            }`}
+                          >
+                            {item.locationName}
+                          </td>
+                          <td
+                            className={`py-2.5 px-2 font-medium whitespace-nowrap ${
+                              !isEnabled ? 'text-[#94A3B8]' : 'text-[#334155]'
+                            }`}
+                          >
+                            {item.category}
+                          </td>
+                          <td
+                            className={`py-2.5 px-2 font-mono text-[11.5px] whitespace-nowrap ${
+                              !isEnabled ? 'text-[#94A3B8]' : 'text-[#2563EB]'
+                            }`}
+                          >
+                            {item.dimensions}
+                          </td>
+                          <td
+                            className={`py-2.5 px-2 font-mono text-[11.5px] whitespace-nowrap ${
+                              !isEnabled ? 'text-[#94A3B8]' : 'text-[#475569]'
+                            }`}
+                          >
+                            {item.thickness}
+                          </td>
+                          <td
+                            className={`py-2.5 px-2 text-right tabular-nums whitespace-nowrap ${
+                              !isEnabled ? 'text-[#94A3B8]' : ''
+                            }`}
+                          >
+                            {item.systemQty.toLocaleString('en-IN')} {item.unit}
+                          </td>
+                          <td
+                            className={`py-2.5 px-2 text-right font-semibold tabular-nums whitespace-nowrap ${
+                              !isEnabled ? 'text-[#94A3B8]' : ''
+                            }`}
+                          >
+                            {item.physicalQty.toLocaleString('en-IN')} {item.unit}
+                          </td>
+                          <td
+                            className={`py-2.5 px-2 text-right font-semibold tabular-nums whitespace-nowrap ${
+                              !isEnabled
+                                ? 'text-[#94A3B8]'
+                                : item.variance < 0
+                                  ? 'text-[#DC2626]'
+                                  : item.variance > 0
+                                    ? 'text-[#16A34A]'
+                                    : 'text-[#64748B]'
+                            }`}
+                          >
+                            {item.variance > 0 ? `+${item.variance}` : item.variance}
+                          </td>
+                          <td className="py-2.5 pl-2 text-right whitespace-nowrap">
+                            <div className="inline-flex items-center justify-end gap-2.5">
+                              <button
+                                type="button"
+                                role="switch"
+                                aria-checked={isEnabled}
+                                aria-label={`${isEnabled ? 'Disable' : 'Enable'} ${item.itemCode}`}
+                                title={isEnabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
+                                disabled={isToggling}
+                                onClick={async () => {
+                                  setTogglingProductId(item.id);
+                                  try {
+                                    await onToggleProductEnabled(item.id);
+                                  } finally {
+                                    setTogglingProductId(null);
+                                  }
+                                }}
+                                className="inline-flex items-center gap-1.5 disabled:opacity-50"
+                              >
+                                <span
+                                  className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                                    isEnabled ? 'bg-[#16A34A]' : 'bg-slate-300'
+                                  }`}
+                                >
+                                  <span
+                                    className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-sm transition-transform ${
+                                      isEnabled ? 'translate-x-[18px]' : 'translate-x-[3px]'
+                                    }`}
+                                  />
+                                </span>
+                                <span
+                                  className={`text-[11px] font-semibold w-[52px] text-left ${
+                                    isEnabled ? 'text-[#16A34A]' : 'text-[#64748B]'
+                                  }`}
+                                >
+                                  {isEnabled ? 'Enabled' : 'Disabled'}
+                                </span>
+                              </button>
+
+                              <button
+                                type="button"
+                                aria-label={`Delete ${item.itemCode}`}
+                                title={`Delete ${item.itemName}`}
+                                onClick={() => setDeleteConfirmItem(item)}
+                                className="p-1.5 rounded-lg text-[#64748B] hover:text-[#DC2626] hover:bg-rose-50 transition-colors"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -2173,6 +2310,73 @@ export function SecondaryViews({
         onUpdateProduct={onUpdateProduct}
         onUpdateSlabLot={onUpdateSlabLot}
       />
+
+      {deleteConfirmItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-slate-900/35 backdrop-blur-[1px]"
+            onClick={() => {
+              if (!deletingProduct) setDeleteConfirmItem(null);
+            }}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="relative z-10 w-full max-w-md bg-white rounded-xl border border-[#E5E9F0] shadow-xl p-6 space-y-4"
+          >
+            <div className="flex items-start gap-3.5">
+              <img
+                src={resolveProductImage(deleteConfirmItem.imageUrl)}
+                alt={deleteConfirmItem.itemName}
+                referrerPolicy="no-referrer"
+                onError={(e) => {
+                  e.currentTarget.src = DEFAULT_PRODUCT_IMAGE;
+                }}
+                className="w-12 h-12 rounded-lg object-cover border border-[#E5E9F0] bg-slate-50 shrink-0"
+              />
+              <div className="min-w-0">
+                <h3 className="text-[15px] font-bold text-[#0F172A]">Delete Product?</h3>
+                <p className="text-[12.5px] text-[#64748B] mt-0.5">
+                  Are you sure you want to permanently delete{' '}
+                  <span className="font-semibold text-[#0F172A]">
+                    {deleteConfirmItem.itemName}
+                  </span>{' '}
+                  (<span className="font-mono">{deleteConfirmItem.itemCode}</span> ·{' '}
+                  {deleteConfirmItem.dimensions}) from {deleteConfirmItem.locationName}?
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#F1F5F9]">
+              <button
+                type="button"
+                disabled={deletingProduct}
+                onClick={() => setDeleteConfirmItem(null)}
+                className="h-9 px-4 rounded-lg border border-[#E2E8F0] text-[12.5px] font-medium text-[#475569] hover:bg-slate-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingProduct}
+                onClick={async () => {
+                  setDeletingProduct(true);
+                  try {
+                    await onDeleteProduct(deleteConfirmItem.id);
+                    setDeleteConfirmItem(null);
+                  } finally {
+                    setDeletingProduct(false);
+                  }
+                }}
+                className="h-9 px-4 rounded-lg bg-[#DC2626] hover:bg-[#B91C1C] text-white text-[12.5px] font-semibold inline-flex items-center gap-1.5 disabled:opacity-60"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{deletingProduct ? 'Deleting...' : 'Delete Product'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

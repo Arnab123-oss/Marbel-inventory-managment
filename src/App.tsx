@@ -403,6 +403,7 @@ export default function App() {
     unit: UnitType;
     qty: number;
     unitPriceInr: number;
+    imageUrl?: string;
   }) {
     const res = await api.createProduct(payload);
     setSnapshot(res.snapshot);
@@ -419,11 +420,26 @@ export default function App() {
       thickness: string;
       locationId: string;
       unitPriceInr: number;
+      imageUrl?: string;
     },
   ) {
     const res = await api.updateProduct(itemId, payload);
     setSnapshot(res.snapshot);
     showToast(`Updated ${res.item.itemCode} (${res.item.category})`);
+  }
+
+  async function handleToggleProductEnabled(itemId: string) {
+    const res = await api.toggleProductEnabled(itemId);
+    setSnapshot(res.snapshot);
+    showToast(
+      `${res.item.enabled !== false ? 'Enabled' : 'Disabled'} ${res.item.itemCode} (${res.item.itemName})`,
+    );
+  }
+
+  async function handleDeleteProduct(itemId: string) {
+    const res = await api.deleteProduct(itemId);
+    setSnapshot(res.snapshot);
+    showToast(`Deleted product ${res.itemCode}`);
   }
 
   async function handleCreateSlabLot(payload: {
@@ -844,9 +860,10 @@ export default function App() {
               liveStreamEnabled={liveStreamEnabled}
               onToggleLiveStream={() => setLiveStreamEnabled((v) => !v)}
               onSelectLocation={(loc) => setSelectedLocation(loc)}
-              onReconcileItem={handleReconcile}
               onCreateProduct={handleCreateProduct}
               onUpdateProduct={handleUpdateProduct}
+              onToggleProductEnabled={handleToggleProductEnabled}
+              onDeleteProduct={handleDeleteProduct}
               onCreateSlabLot={handleCreateSlabLot}
               onUpdateSlabLot={handleUpdateSlabLot}
               onCreatePurchaseBill={handleCreatePurchaseBill}

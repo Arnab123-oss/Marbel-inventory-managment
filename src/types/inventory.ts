@@ -133,6 +133,8 @@ export interface VarianceItem {
   unitPriceInr: number;
   status: 'In Stock' | 'Low Stock' | 'Out of Stock' | 'Overstock';
   lastCountedAt: string;
+  imageUrl?: string;
+  enabled?: boolean;
 }
 
 export interface ProductHistoryEntry {
@@ -162,6 +164,7 @@ export interface SlabLot {
   branchName: string;
   finish: 'Polished' | 'Honed' | 'Leather';
   status: 'Available' | 'Reserved' | 'Sold' | 'In Cutting';
+  imageUrl?: string;
 }
 
 export interface PurchaseBill {
