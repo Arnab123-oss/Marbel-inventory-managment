@@ -1,4 +1,5 @@
 import {
+  ArrowRight,
   LayoutGrid,
   Pause,
   Play,
@@ -7,8 +8,8 @@ import {
 } from 'lucide-react';
 import {type DragEvent, useCallback, useEffect, useMemo, useState} from 'react';
 import {AuthScreen} from './components/auth/AuthScreen';
-import {AccuracyDonutChart} from './components/charts/AccuracyDonutChart';
 import {LocationBarChart} from './components/charts/LocationBarChart';
+import {SalesTrendChart} from './components/charts/SalesTrendChart';
 import {StockStatusDonutChart} from './components/charts/StockStatusDonutChart';
 import {TrendLineChart} from './components/charts/TrendLineChart';
 import {LocationDetailDrawer} from './components/modals/LocationDetailDrawer';
@@ -17,10 +18,16 @@ import {TopHeader} from './components/TopHeader';
 import {SecondaryViews} from './components/views/SecondaryViews';
 import {DraggableWidgetShell} from './components/widgets/DraggableWidgetShell';
 import {KpiCard} from './components/widgets/KpiCard';
-import {LocationTableWidget} from './components/widgets/LocationTableWidget';
+import {RecentActivitiesWidget} from './components/widgets/RecentActivitiesWidget';
 import {RecentAlertsWidget} from './components/widgets/RecentAlertsWidget';
+import {TopProductsWidget} from './components/widgets/TopProductsWidget';
 import {TopVarianceWidget} from './components/widgets/TopVarianceWidget';
 import {api} from './services/api';
+import {
+  computeAllBranches,
+  getPurchaseBillLines,
+  getSalesBillLines,
+} from './utils/branchMetrics';
 import type {
   CustomerRecord,
   DashboardFilters,
@@ -30,6 +37,9 @@ import type {
   KpiId,
   LocationRow,
   NavSection,
+  PurchaseBill,
+  SalesBill,
+  SalesPaymentStatus,
   SlabLot,
   StoneCategory,
   SupplierRecord,
@@ -40,19 +50,19 @@ import type {
 } from './types/inventory';
 
 const DEFAULT_KPI_ORDER: KpiId[] = [
-  'totalBranches',
-  'totalProducts',
+  'totalSales',
+  'totalPurchases',
   'totalStockValue',
-  'inventoryAccuracy',
-  'stockInTransit',
+  'netProfit',
   'lowStockItems',
 ];
 
 const DEFAULT_WIDGET_ORDER: WidgetId[] = [
-  'accuracyOverview',
+  'salesTrend',
   'valueTrend',
   'stockValueByLocation',
-  'inventoryByLocation',
+  'topProducts',
+  'recentActivities',
   'stockStatusSummary',
   'accuracyTrend',
   'topVarianceItems',
@@ -60,17 +70,23 @@ const DEFAULT_WIDGET_ORDER: WidgetId[] = [
 ];
 
 const DEFAULT_SPANS: Record<WidgetId, 1 | 2 | 3> = {
+  salesTrend: 1,
+  topProducts: 1,
+  recentActivities: 2,
   accuracyOverview: 1,
   valueTrend: 1,
   stockValueByLocation: 1,
   inventoryByLocation: 2,
   stockStatusSummary: 1,
-  accuracyTrend: 1,
-  topVarianceItems: 1,
+  accuracyTrend: 2,
+  topVarianceItems: 2,
   recentAlerts: 1,
 };
 
 const WIDGET_TITLES: Record<WidgetId, string> = {
+  salesTrend: 'Sales Trend',
+  topProducts: 'Top Products',
+  recentActivities: 'Recent Activities',
   accuracyOverview: 'Stock Accuracy Overview',
   valueTrend: 'Inventory Value Trend (₹)',
   stockValueByLocation: 'Stock Value by Branch (₹)',
@@ -80,6 +96,30 @@ const WIDGET_TITLES: Record<WidgetId, string> = {
   topVarianceItems: 'Top Variance Items (sq. ft / pcs / box)',
   recentAlerts: 'Recent Shop Alerts',
 };
+
+function sanitizeDashboardLayout(raw: DashboardLayout): DashboardLayout {
+  const validKpis: KpiId[] = (raw.kpiOrder || []).filter((k) =>
+    DEFAULT_KPI_ORDER.includes(k),
+  );
+  const kpiOrder =
+    validKpis.length === DEFAULT_KPI_ORDER.length ? validKpis : [...DEFAULT_KPI_ORDER];
+
+  const rawWidgets = Array.isArray(raw.widgetOrder) ? raw.widgetOrder : [];
+  const validWidgets: WidgetId[] = rawWidgets.filter((w) =>
+    DEFAULT_WIDGET_ORDER.includes(w),
+  );
+  const hasAllCurrent = validWidgets.length === DEFAULT_WIDGET_ORDER.length;
+  const widgetOrder = hasAllCurrent ? validWidgets : [...DEFAULT_WIDGET_ORDER];
+  const widgetSpans = hasAllCurrent
+    ? {...DEFAULT_SPANS, ...raw.widgetSpans}
+    : {...DEFAULT_SPANS};
+  return {
+    ...raw,
+    kpiOrder,
+    widgetOrder,
+    widgetSpans,
+  };
+}
 
 function reorderArray<T>(list: T[], fromItem: T, toItem: T): T[] {
   const fromIdx = list.indexOf(fromItem);
@@ -148,7 +188,7 @@ export default function App() {
         setSnapshot(initialSnap);
         if (me) {
           const {layout: savedLayout} = await api.getLayout();
-          if (active) setLayout(savedLayout);
+          if (active) setLayout(sanitizeDashboardLayout(savedLayout));
         }
       } catch (err) {
         console.error('Initialization error:', err);
@@ -165,7 +205,7 @@ export default function App() {
     setUser(authedUser);
     try {
       const {layout: savedLayout} = await api.getLayout();
-      setLayout(savedLayout);
+      setLayout(sanitizeDashboardLayout(savedLayout));
     } catch {
       // ignore
     }
@@ -198,15 +238,82 @@ export default function App() {
     };
   }, [user, liveStreamEnabled]);
 
+  const computedBranchBreakdowns = useMemo(() => {
+    if (!snapshot) return [];
+    return computeAllBranches(snapshot);
+  }, [snapshot]);
+
+  const computedLocations = useMemo(() => {
+    return computedBranchBreakdowns.map((b) => b.location);
+  }, [computedBranchBreakdowns]);
+
+  const liveKpis = useMemo(() => {
+    if (!snapshot) return null;
+    let totalSalesInr = 0;
+    let totalSalesCollectedInr = 0;
+    for (const bill of snapshot.salesBills) {
+      for (const line of getSalesBillLines(bill)) {
+        const amt = Math.max(0, Number(line.amountInr) || 0);
+        totalSalesInr += amt;
+        if (line.status === 'Paid') totalSalesCollectedInr += amt;
+        else if (line.status === 'Partially Paid') totalSalesCollectedInr += Math.round(amt * 0.5);
+      }
+    }
+
+    let totalPurchasesInr = 0;
+    let totalPurchasesPaidInr = 0;
+    for (const bill of snapshot.purchaseBills) {
+      const billTotal = getPurchaseBillLines(bill).reduce(
+        (sum, l) => sum + Math.max(0, Number(l.amountInr) || 0),
+        0,
+      );
+      totalPurchasesInr += billTotal;
+      if (bill.status === 'Paid') totalPurchasesPaidInr += billTotal;
+      else if (bill.status === 'Partial') totalPurchasesPaidInr += Math.round(billTotal * 0.5);
+    }
+
+    const totalStockValueInr = computedBranchBreakdowns.reduce(
+      (sum, b) => sum + b.net.valueInr,
+      0,
+    );
+    const netProfitInr = totalSalesInr - totalPurchasesInr;
+    const netProfitMarginPct =
+      totalSalesInr > 0
+        ? (netProfitInr / totalSalesInr) * 100
+        : totalPurchasesInr > 0
+          ? -100
+          : 0;
+    const lowStockItems = snapshot.varianceItems.filter(
+      (i) => i.enabled !== false && (i.status === 'Low Stock' || i.status === 'Out of Stock'),
+    ).length;
+
+    return {
+      ...snapshot.kpis,
+      totalSalesInr: Math.round(totalSalesInr),
+      totalSalesCount: snapshot.salesBills.length,
+      totalSalesCollectedPct:
+        totalSalesInr > 0 ? (totalSalesCollectedInr / totalSalesInr) * 100 : 0,
+      totalPurchasesInr: Math.round(totalPurchasesInr),
+      totalPurchasesCount: snapshot.purchaseBills.length,
+      totalPurchasesPaidPct:
+        totalPurchasesInr > 0 ? (totalPurchasesPaidInr / totalPurchasesInr) * 100 : 0,
+      totalStockValueInr: Math.round(totalStockValueInr),
+      totalStockValueCr: Number((totalStockValueInr / 10000000).toFixed(2)),
+      netProfitInr: Math.round(netProfitInr),
+      netProfitMarginPct,
+      lowStockItems,
+    };
+  }, [snapshot, computedBranchBreakdowns]);
+
   const syncedSelectedLocation = useMemo(() => {
     if (!selectedLocation || !snapshot) return null;
-    return snapshot.locations.find((l) => l.id === selectedLocation.id) || selectedLocation;
-  }, [selectedLocation, snapshot]);
+    return computedLocations.find((l) => l.id === selectedLocation.id) || selectedLocation;
+  }, [selectedLocation, snapshot, computedLocations]);
 
   const derivedView = useMemo(() => {
     if (!snapshot) return null;
 
-    const filteredLocations = snapshot.locations.filter((loc) => {
+    const filteredLocations = computedLocations.filter((loc) => {
       if (filters.locationType !== 'All' && loc.type !== filters.locationType) {
         return false;
       }
@@ -267,7 +374,7 @@ export default function App() {
   const handleResetLayout = useCallback(async () => {
     try {
       const {layout: reset} = await api.resetLayout();
-      setLayout(reset);
+      setLayout(sanitizeDashboardLayout(reset));
       showToast('Dashboard widget layout restored to default');
     } catch {
       setLayout({
@@ -443,6 +550,7 @@ export default function App() {
   }
 
   async function handleCreateSlabLot(payload: {
+    lotNumber?: string;
     stoneName: string;
     category: StoneCategory;
     dimensionsFt: string;
@@ -451,10 +559,11 @@ export default function App() {
     thicknessMm: number;
     branchName: string;
     finish: 'Polished' | 'Honed' | 'Leather';
+    status: SlabLot['status'];
   }) {
     const res = await api.createSlabLot(payload);
     setSnapshot(res.snapshot);
-    showToast(`Registered ${res.slab.lotNumber} (${res.slab.totalSqFt} sq. ft)`);
+    showToast(`Registered ${res.slab.lotNumber} (${res.slab.totalSqFt} sq. ft · ${res.slab.status})`);
   }
 
   async function handleUpdateSlabLot(
@@ -476,30 +585,112 @@ export default function App() {
     showToast(`Updated slab ${res.slab.lotNumber} (${res.slab.status})`);
   }
 
+  async function handleToggleSlabEnabled(slabId: string) {
+    const res = await api.toggleSlabEnabled(slabId);
+    setSnapshot(res.snapshot);
+    showToast(
+      `${res.slab.enabled !== false ? 'Enabled' : 'Disabled'} slab ${res.slab.lotNumber} (${res.slab.stoneName})`,
+    );
+  }
+
+  async function handleDeleteSlabLot(slabId: string) {
+    const res = await api.deleteSlabLot(slabId);
+    setSnapshot(res.snapshot);
+    showToast(`Deleted slab ${res.lotNumber}`);
+  }
+
   async function handleCreatePurchaseBill(payload: {
+    billNo: string;
     supplierName: string;
     branchName: string;
-    itemCode: string;
-    qty: number;
-    unit: UnitType;
-    totalInr: number;
+    status: PurchaseBill['status'];
+    dateLabel: string;
+    dateIso?: string;
+    items: Array<{
+      itemCode: string;
+      qty: number;
+      unit: UnitType;
+      amountInr: number;
+    }>;
   }) {
     const res = await api.createPurchaseBill(payload);
     setSnapshot(res.snapshot);
-    showToast(`Posted purchase bill ${res.bill.billNo}`);
+    showToast(
+      `Posted purchase bill ${res.bill.billNo} (${res.bill.items?.length || 1} item${(res.bill.items?.length || 1) === 1 ? '' : 's'})`,
+    );
+  }
+
+  async function handleUpdatePurchaseBill(
+    billId: string,
+    payload: {
+      billNo: string;
+      supplierName: string;
+      branchName: string;
+      status: PurchaseBill['status'];
+      dateLabel: string;
+      dateIso?: string;
+      items: Array<{
+        itemCode: string;
+        qty: number;
+        unit: UnitType;
+        amountInr: number;
+      }>;
+    },
+  ): Promise<PurchaseBill> {
+    const res = await api.updatePurchaseBill(billId, payload);
+    setSnapshot(res.snapshot);
+    showToast(
+      `Updated purchase bill ${res.bill.billNo} (${res.bill.items?.length || 1} item${(res.bill.items?.length || 1) === 1 ? '' : 's'})`,
+    );
+    return res.bill;
   }
 
   async function handleCreateSalesBill(payload: {
+    invoiceNo: string;
     customerName: string;
+    customerPhone: string;
+    customerAddress: string;
     branchName: string;
-    itemCode: string;
-    qty: number;
-    unit: UnitType;
-    totalInr: number;
+    dateLabel: string;
+    dateIso?: string;
+    items: Array<{
+      itemCode: string;
+      qty: number;
+      unit: UnitType;
+      amountInr: number;
+      status: SalesPaymentStatus;
+    }>;
   }) {
     const res = await api.createSalesBill(payload);
     setSnapshot(res.snapshot);
-    showToast(`Issued sales invoice ${res.bill.invoiceNo}`);
+    showToast(
+      `Issued sales invoice ${res.bill.invoiceNo} (${res.bill.items?.length || 1} item${(res.bill.items?.length || 1) === 1 ? '' : 's'} · ${res.bill.status})`,
+    );
+  }
+
+  async function handleUpdateSalesBill(
+    billId: string,
+    payload: {
+      invoiceNo: string;
+      customerName: string;
+      customerPhone: string;
+      customerAddress: string;
+      branchName: string;
+      dateLabel: string;
+      dateIso?: string;
+      items: Array<{
+        itemCode: string;
+        qty: number;
+        unit: UnitType;
+        amountInr: number;
+        status: SalesPaymentStatus;
+      }>;
+    },
+  ): Promise<SalesBill> {
+    const res = await api.updateSalesBill(billId, payload);
+    setSnapshot(res.snapshot);
+    showToast(`Updated sales invoice ${res.bill.invoiceNo} (${res.bill.status})`);
+    return res.bill;
   }
 
   async function handleCreateTransfer(payload: {
@@ -533,6 +724,26 @@ export default function App() {
     const res = await api.createSupplier(payload);
     setSnapshot(res.snapshot);
     showToast(`Added supplier ${res.supplier.name}`);
+  }
+
+  async function handleUpdateSupplier(
+    supplierId: string,
+    payload: {
+      name: string;
+      origin: string;
+      specialty: string;
+      phone: string;
+    },
+  ) {
+    const res = await api.updateSupplier(supplierId, payload);
+    setSnapshot(res.snapshot);
+    showToast(`Updated supplier ${res.supplier.name}`);
+  }
+
+  async function handleDeleteSupplier(supplierId: string) {
+    const res = await api.deleteSupplier(supplierId);
+    setSnapshot(res.snapshot);
+    showToast(`Deleted supplier ${res.name}`);
   }
 
   async function handleToggleAcknowledgeAlert(alertId: string) {
@@ -578,8 +789,27 @@ export default function App() {
     currentDerived: NonNullable<typeof derivedView>,
   ) {
     switch (id) {
+      case 'salesTrend':
+        return <SalesTrendChart salesBills={currentSnapshot.salesBills} />;
+      case 'topProducts':
+        return (
+          <TopProductsWidget
+            salesBills={currentSnapshot.salesBills}
+            varianceItems={currentSnapshot.varianceItems}
+            onViewProducts={() => setActiveSection('products')}
+          />
+        );
+      case 'recentActivities':
+        return (
+          <RecentActivitiesWidget
+            salesBills={currentSnapshot.salesBills}
+            purchaseBills={currentSnapshot.purchaseBills}
+            transfers={currentSnapshot.transfers}
+            onNavigate={(sec) => setActiveSection(sec)}
+          />
+        );
       case 'accuracyOverview':
-        return <AccuracyDonutChart data={currentSnapshot.accuracyBreakdown} />;
+        return null;
       case 'valueTrend':
         return (
           <TrendLineChart
@@ -602,13 +832,7 @@ export default function App() {
           />
         );
       case 'inventoryByLocation':
-        return (
-          <LocationTableWidget
-            locations={currentDerived.filteredLocations}
-            selectedLocationId={syncedSelectedLocation?.id || null}
-            onViewLocation={(loc) => setSelectedLocation(loc)}
-          />
-        );
+        return null;
       case 'stockStatusSummary':
         return (
           <StockStatusDonutChart
@@ -767,23 +991,25 @@ export default function App() {
                 </div>
               )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3.5">
-                {layout.kpiOrder.map((kpiId) => (
-                  <KpiCard
-                    key={kpiId}
-                    id={kpiId}
-                    metrics={snapshot.kpis}
-                    isDragging={draggingKpi === kpiId}
-                    isDropTarget={dropTargetKpi === kpiId && draggingKpi !== kpiId}
-                    onDragStart={handleKpiDragStart}
-                    onDragOver={handleKpiDragOver}
-                    onDrop={handleKpiDrop}
-                    onDragEnd={() => {
-                      setDraggingKpi(null);
-                      setDropTargetKpi(null);
-                    }}
-                  />
-                ))}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3.5">
+                {layout.kpiOrder
+                  .filter((kpiId) => DEFAULT_KPI_ORDER.includes(kpiId))
+                  .map((kpiId) => (
+                    <KpiCard
+                      key={kpiId}
+                      id={kpiId}
+                      metrics={liveKpis || snapshot.kpis}
+                      isDragging={draggingKpi === kpiId}
+                      isDropTarget={dropTargetKpi === kpiId && draggingKpi !== kpiId}
+                      onDragStart={handleKpiDragStart}
+                      onDragOver={handleKpiDragOver}
+                      onDrop={handleKpiDrop}
+                      onDragEnd={() => {
+                        setDraggingKpi(null);
+                        setDropTargetKpi(null);
+                      }}
+                    />
+                  ))}
               </div>
 
               {(filters.locationType !== 'All' ||
@@ -827,29 +1053,43 @@ export default function App() {
               )}
 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
-                {layout.widgetOrder.map((widgetId) => (
-                  <DraggableWidgetShell
-                    key={widgetId}
-                    id={widgetId}
-                    title={WIDGET_TITLES[widgetId]}
-                    span={layout.widgetSpans[widgetId] || 1}
-                    customizeMode={customizeMode}
-                    isDragging={draggingWidget === widgetId}
-                    isDropTarget={
-                      dropTargetWidget === widgetId && draggingWidget !== widgetId
-                    }
-                    onToggleSpan={handleToggleWidgetSpan}
-                    onDragStart={handleWidgetDragStart}
-                    onDragOver={handleWidgetDragOver}
-                    onDrop={handleWidgetDrop}
-                    onDragEnd={() => {
-                      setDraggingWidget(null);
-                      setDropTargetWidget(null);
-                    }}
-                  >
-                    {renderWidgetContent(widgetId, snapshot, derivedView)}
-                  </DraggableWidgetShell>
-                ))}
+                {layout.widgetOrder
+                  .filter((widgetId) => DEFAULT_WIDGET_ORDER.includes(widgetId))
+                  .map((widgetId) => (
+                    <DraggableWidgetShell
+                      key={widgetId}
+                      id={widgetId}
+                      title={WIDGET_TITLES[widgetId]}
+                      span={layout.widgetSpans[widgetId] || 1}
+                      customizeMode={customizeMode}
+                      isDragging={draggingWidget === widgetId}
+                      isDropTarget={
+                        dropTargetWidget === widgetId && draggingWidget !== widgetId
+                      }
+                      headerExtra={
+                        widgetId === 'recentActivities' ? (
+                          <button
+                            type="button"
+                            onClick={() => setActiveSection('sales-bills')}
+                            className="ml-auto inline-flex items-center gap-1 text-[12px] font-semibold text-[#2563EB] hover:text-[#1D4ED8] hover:underline whitespace-nowrap shrink-0"
+                          >
+                            <span>View Details</span>
+                            <ArrowRight className="w-3.5 h-3.5" />
+                          </button>
+                        ) : undefined
+                      }
+                      onToggleSpan={handleToggleWidgetSpan}
+                      onDragStart={handleWidgetDragStart}
+                      onDragOver={handleWidgetDragOver}
+                      onDrop={handleWidgetDrop}
+                      onDragEnd={() => {
+                        setDraggingWidget(null);
+                        setDropTargetWidget(null);
+                      }}
+                    >
+                      {renderWidgetContent(widgetId, snapshot, derivedView)}
+                    </DraggableWidgetShell>
+                  ))}
               </div>
             </div>
           ) : (
@@ -858,6 +1098,7 @@ export default function App() {
               snapshot={snapshot}
               user={user}
               liveStreamEnabled={liveStreamEnabled}
+              selectedLocationId={syncedSelectedLocation?.id || null}
               onToggleLiveStream={() => setLiveStreamEnabled((v) => !v)}
               onSelectLocation={(loc) => setSelectedLocation(loc)}
               onCreateProduct={handleCreateProduct}
@@ -866,11 +1107,17 @@ export default function App() {
               onDeleteProduct={handleDeleteProduct}
               onCreateSlabLot={handleCreateSlabLot}
               onUpdateSlabLot={handleUpdateSlabLot}
+              onToggleSlabEnabled={handleToggleSlabEnabled}
+              onDeleteSlabLot={handleDeleteSlabLot}
               onCreatePurchaseBill={handleCreatePurchaseBill}
+              onUpdatePurchaseBill={handleUpdatePurchaseBill}
               onCreateSalesBill={handleCreateSalesBill}
+              onUpdateSalesBill={handleUpdateSalesBill}
               onCreateTransfer={handleCreateTransfer}
               onCreateCustomer={handleCreateCustomer}
               onCreateSupplier={handleCreateSupplier}
+              onUpdateSupplier={handleUpdateSupplier}
+              onDeleteSupplier={handleDeleteSupplier}
               onToggleAcknowledgeAlert={handleToggleAcknowledgeAlert}
               onExportCsv={handleExportCsv}
               onResetLayout={handleResetLayout}
@@ -883,6 +1130,9 @@ export default function App() {
       <LocationDetailDrawer
         location={syncedSelectedLocation}
         items={snapshot.varianceItems}
+        slabs={snapshot.slabs}
+        purchaseBills={snapshot.purchaseBills}
+        salesBills={snapshot.salesBills}
         onClose={() => setSelectedLocation(null)}
         onReconcile={handleReconcile}
       />

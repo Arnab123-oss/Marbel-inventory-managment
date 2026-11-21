@@ -1,5 +1,6 @@
 import {useState} from 'react';
 import type {LocationRow} from '../../types/inventory';
+import {formatInrCompact} from '../../utils/branchMetrics';
 
 interface LocationBarChartProps {
   locations: LocationRow[];
@@ -13,14 +14,22 @@ export function LocationBarChart({
   onSelectLocation,
 }: LocationBarChartProps) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const maxAxisCr = 8;
-  const ticks = [0, 2, 4, 6, 8];
+
+  const valuesInr = locations.map((l) =>
+    typeof l.stockValueInr === 'number'
+      ? l.stockValueInr
+      : Math.round(l.stockValueCr * 10000000),
+  );
+  const rawMax = Math.max(1000000, ...valuesInr);
+  const maxAxisInr = Math.ceil(rawMax / 2500000) * 2500000;
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map((frac) => Math.round(maxAxisInr * frac));
 
   return (
     <div className="pt-1 space-y-2.5">
       <div className="space-y-2.5">
-        {locations.map((loc) => {
-          const widthPct = Math.min(100, (loc.stockValueCr / maxAxisCr) * 100);
+        {locations.map((loc, idx) => {
+          const valInr = valuesInr[idx] || 0;
+          const widthPct = Math.min(100, (valInr / maxAxisInr) * 100);
           const isHovered = hoveredId === loc.id;
           const isSelected = selectedLocationId === loc.id;
           return (
@@ -46,8 +55,8 @@ export function LocationBarChart({
                     style={{width: `${widthPct}%`}}
                   />
                 </div>
-                <span className="text-[11px] font-semibold text-[#334155] tabular-nums whitespace-nowrap w-[58px] text-right">
-                  ₹ {loc.stockValueCr.toFixed(2)} Cr
+                <span className="text-[11px] font-semibold text-[#334155] tabular-nums whitespace-nowrap w-[66px] text-right">
+                  {formatInrCompact(valInr)}
                 </span>
               </div>
             </button>
@@ -58,9 +67,15 @@ export function LocationBarChart({
       {/* X-axis tick legend aligned under the bar area */}
       <div className="grid grid-cols-[100px_1fr] gap-3 pt-1 border-t border-slate-100">
         <div />
-        <div className="flex items-center justify-between pr-[66px] text-[10px] text-[#64748B] tabular-nums">
+        <div className="flex items-center justify-between pr-[74px] text-[10px] text-[#64748B] tabular-nums">
           {ticks.map((t) => (
-            <span key={t}>{t === 0 ? '0' : `${t}Cr`}</span>
+            <span key={t}>
+              {t === 0
+                ? '0'
+                : t >= 10000000
+                  ? `${(t / 10000000).toFixed(1)}Cr`
+                  : `${Math.round(t / 100000)}L`}
+            </span>
           ))}
         </div>
       </div>

@@ -5,6 +5,7 @@ import type {
   InventorySnapshot,
   PurchaseBill,
   SalesBill,
+  SalesPaymentStatus,
   SlabLot,
   StockTransfer,
   StoneCategory,
@@ -132,6 +133,7 @@ export const api = {
     ),
 
   createSlabLot: (payload: {
+    lotNumber?: string;
     stoneName: string;
     category: StoneCategory;
     dimensionsFt: string;
@@ -140,6 +142,7 @@ export const api = {
     thicknessMm: number;
     branchName: string;
     finish: 'Polished' | 'Honed' | 'Leather';
+    status: SlabLot['status'];
   }) =>
     requestJson<{slab: SlabLot; snapshot: InventorySnapshot}>('/api/inventory/slabs', {
       method: 'POST',
@@ -165,13 +168,35 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
+  toggleSlabEnabled: (slabId: string) =>
+    requestJson<{slab: SlabLot; snapshot: InventorySnapshot}>(
+      `/api/inventory/slabs/${slabId}/toggle`,
+      {
+        method: 'PATCH',
+      },
+    ),
+
+  deleteSlabLot: (slabId: string) =>
+    requestJson<{deletedId: string; lotNumber: string; snapshot: InventorySnapshot}>(
+      `/api/inventory/slabs/${slabId}`,
+      {
+        method: 'DELETE',
+      },
+    ),
+
   createPurchaseBill: (payload: {
+    billNo: string;
     supplierName: string;
     branchName: string;
-    itemCode: string;
-    qty: number;
-    unit: UnitType;
-    totalInr: number;
+    status: PurchaseBill['status'];
+    dateLabel: string;
+    dateIso?: string;
+    items: Array<{
+      itemCode: string;
+      qty: number;
+      unit: UnitType;
+      amountInr: number;
+    }>;
   }) =>
     requestJson<{bill: PurchaseBill; snapshot: InventorySnapshot}>(
       '/api/inventory/purchase-bills',
@@ -181,18 +206,78 @@ export const api = {
       },
     ),
 
+  updatePurchaseBill: (
+    billId: string,
+    payload: {
+      billNo: string;
+      supplierName: string;
+      branchName: string;
+      status: PurchaseBill['status'];
+      dateLabel: string;
+      dateIso?: string;
+      items: Array<{
+        itemCode: string;
+        qty: number;
+        unit: UnitType;
+        amountInr: number;
+      }>;
+    },
+  ) =>
+    requestJson<{bill: PurchaseBill; snapshot: InventorySnapshot}>(
+      `/api/inventory/purchase-bills/${billId}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      },
+    ),
+
   createSalesBill: (payload: {
+    invoiceNo: string;
     customerName: string;
+    customerPhone: string;
+    customerAddress: string;
     branchName: string;
-    itemCode: string;
-    qty: number;
-    unit: UnitType;
-    totalInr: number;
+    dateLabel: string;
+    dateIso?: string;
+    items: Array<{
+      itemCode: string;
+      qty: number;
+      unit: UnitType;
+      amountInr: number;
+      status: SalesPaymentStatus;
+    }>;
   }) =>
     requestJson<{bill: SalesBill; snapshot: InventorySnapshot}>('/api/inventory/sales-bills', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  updateSalesBill: (
+    billId: string,
+    payload: {
+      invoiceNo: string;
+      customerName: string;
+      customerPhone: string;
+      customerAddress: string;
+      branchName: string;
+      dateLabel: string;
+      dateIso?: string;
+      items: Array<{
+        itemCode: string;
+        qty: number;
+        unit: UnitType;
+        amountInr: number;
+        status: SalesPaymentStatus;
+      }>;
+    },
+  ) =>
+    requestJson<{bill: SalesBill; snapshot: InventorySnapshot}>(
+      `/api/inventory/sales-bills/${billId}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      },
+    ),
 
   createTransfer: (payload: {
     itemCode: string;
@@ -230,6 +315,31 @@ export const api = {
       {
         method: 'POST',
         body: JSON.stringify(payload),
+      },
+    ),
+
+  updateSupplier: (
+    supplierId: string,
+    payload: {
+      name: string;
+      origin: string;
+      specialty: string;
+      phone: string;
+    },
+  ) =>
+    requestJson<{supplier: SupplierRecord; snapshot: InventorySnapshot}>(
+      `/api/inventory/suppliers/${supplierId}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      },
+    ),
+
+  deleteSupplier: (supplierId: string) =>
+    requestJson<{deletedId: string; name: string; snapshot: InventorySnapshot}>(
+      `/api/inventory/suppliers/${supplierId}`,
+      {
+        method: 'DELETE',
       },
     ),
 

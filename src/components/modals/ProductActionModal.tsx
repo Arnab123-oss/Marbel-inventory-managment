@@ -105,7 +105,7 @@ export function ProductActionModal({
   const [sThick, setSThick] = useState('18');
   const [sBranch, setSBranch] = useState('');
   const [sFinish, setSFinish] = useState<SlabLot['finish']>('Polished');
-  const [sStatus, setSStatus] = useState<SlabLot['status']>('Available');
+  const [sStatus, setSStatus] = useState<SlabLot['status']>('In Stock');
 
   useEffect(() => {
     setMode(initialMode);
@@ -406,13 +406,7 @@ export function ProductActionModal({
                   <div className="text-[11px] font-medium text-[#64748B]">Status</div>
                   <div
                     className={`mt-1 text-[18px] font-bold ${
-                      target.slab.status === 'Available'
-                        ? 'text-[#16A34A]'
-                        : target.slab.status === 'Sold'
-                          ? 'text-[#DC2626]'
-                          : target.slab.status === 'Reserved'
-                            ? 'text-[#2563EB]'
-                            : 'text-[#D97706]'
+                      target.slab.status === 'In Stock' ? 'text-[#16A34A]' : 'text-[#DC2626]'
                     }`}
                   >
                     {target.slab.status}
@@ -688,10 +682,8 @@ export function ProductActionModal({
                     onChange={(e) => setSStatus(e.target.value as SlabLot['status'])}
                     className="w-full h-9 px-2.5 text-[12.5px] rounded-lg border border-[#E2E8F0] bg-white"
                   >
-                    <option value="Available">Available</option>
-                    <option value="Reserved">Reserved</option>
-                    <option value="Sold">Sold</option>
-                    <option value="In Cutting">In Cutting</option>
+                    <option value="In Stock">In Stock</option>
+                    <option value="Out of Stock">Out of Stock</option>
                   </select>
                 </div>
                 <div>

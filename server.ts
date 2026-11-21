@@ -12,7 +12,10 @@ import type {
   LocationRow,
   ProductHistoryEntry,
   PurchaseBill,
+  PurchaseBillItem,
   SalesBill,
+  SalesBillItem,
+  SalesPaymentStatus,
   SlabLot,
   StockTransfer,
   StoneCategory,
@@ -22,6 +25,7 @@ import type {
   VarianceItem,
   WidgetId,
 } from './src/types/inventory.ts';
+import {computeAllBranches} from './src/utils/branchMetrics.ts';
 
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -45,19 +49,19 @@ interface StoreSchema {
 }
 
 const DEFAULT_KPI_ORDER: KpiId[] = [
-  'totalBranches',
-  'totalProducts',
+  'totalSales',
+  'totalPurchases',
   'totalStockValue',
-  'inventoryAccuracy',
-  'stockInTransit',
+  'netProfit',
   'lowStockItems',
 ];
 
 const DEFAULT_WIDGET_ORDER: WidgetId[] = [
-  'accuracyOverview',
+  'salesTrend',
   'valueTrend',
   'stockValueByLocation',
-  'inventoryByLocation',
+  'topProducts',
+  'recentActivities',
   'stockStatusSummary',
   'accuracyTrend',
   'topVarianceItems',
@@ -65,13 +69,16 @@ const DEFAULT_WIDGET_ORDER: WidgetId[] = [
 ];
 
 const DEFAULT_WIDGET_SPANS: Record<WidgetId, 1 | 2 | 3> = {
+  salesTrend: 1,
+  topProducts: 1,
+  recentActivities: 2,
   accuracyOverview: 1,
   valueTrend: 1,
   stockValueByLocation: 1,
   inventoryByLocation: 2,
   stockStatusSummary: 1,
-  accuracyTrend: 1,
-  topVarianceItems: 1,
+  accuracyTrend: 2,
+  topVarianceItems: 2,
   recentAlerts: 1,
 };
 
@@ -82,6 +89,98 @@ function createDefaultLayout(): DashboardLayout {
     widgetSpans: {...DEFAULT_WIDGET_SPANS},
     updatedAt: new Date().toISOString(),
   };
+}
+
+function sanitizeLayoutServer(layout: DashboardLayout): {layout: DashboardLayout; changed: boolean} {
+  const rawKpis = Array.isArray(layout.kpiOrder) ? layout.kpiOrder : [];
+  const validKpis: KpiId[] = rawKpis.filter((k) => DEFAULT_KPI_ORDER.includes(k));
+  const nextKpiOrder: KpiId[] =
+    validKpis.length === DEFAULT_KPI_ORDER.length ? validKpis : [...DEFAULT_KPI_ORDER];
+  const kpiChanged =
+    nextKpiOrder.length !== rawKpis.length ||
+    nextKpiOrder.some((k, idx) => rawKpis[idx] !== k);
+
+  const rawWidgets = Array.isArray(layout.widgetOrder) ? layout.widgetOrder : [];
+  const validWidgets: WidgetId[] = rawWidgets.filter((w) =>
+    DEFAULT_WIDGET_ORDER.includes(w),
+  );
+  const hasAllCurrent = validWidgets.length === DEFAULT_WIDGET_ORDER.length;
+  const nextOrder: WidgetId[] = hasAllCurrent ? validWidgets : [...DEFAULT_WIDGET_ORDER];
+  const orderChanged =
+    kpiChanged ||
+    !hasAllCurrent ||
+    nextOrder.length !== rawWidgets.length ||
+    nextOrder.some((w, idx) => rawWidgets[idx] !== w);
+  const nextSpans = hasAllCurrent
+    ? {...DEFAULT_WIDGET_SPANS, ...layout.widgetSpans}
+    : {...DEFAULT_WIDGET_SPANS};
+  return {
+    layout: {
+      ...layout,
+      kpiOrder: nextKpiOrder,
+      widgetOrder: nextOrder,
+      widgetSpans: nextSpans,
+    },
+    changed: orderChanged,
+  };
+}
+
+function syncLocationsFromLedger(snap: InventorySnapshot): boolean {
+  const computed = computeAllBranches(snap);
+  let changed = false;
+  snap.locations = computed.map((entry, idx) => {
+    const prev = snap.locations[idx];
+    const next = entry.location;
+    if (
+      !prev ||
+      prev.totalItems !== next.totalItems ||
+      prev.sqftQty !== next.sqftQty ||
+      prev.pcsQty !== next.pcsQty ||
+      prev.boxQty !== next.boxQty ||
+      prev.stockValueInr !== next.stockValueInr ||
+      prev.stockValueCr !== next.stockValueCr ||
+      prev.inventoryAccuracyPct !== next.inventoryAccuracyPct ||
+      prev.minorVarianceItems !== next.minorVarianceItems ||
+      prev.majorVarianceItems !== next.majorVarianceItems ||
+      prev.lowStockItems !== next.lowStockItems
+    ) {
+      changed = true;
+    }
+    return next;
+  });
+
+  const totalValueInr = computed.reduce((sum, b) => sum + b.net.valueInr, 0);
+  const totalValueCr = Number((totalValueInr / 10000000).toFixed(2));
+  const totalSkus = computed.reduce((sum, b) => sum + b.net.skus, 0);
+  const weightedAcc =
+    totalSkus > 0
+      ? Number(
+          (
+            computed.reduce((sum, b) => sum + b.net.accuracyPct * b.net.skus, 0) / totalSkus
+          ).toFixed(2),
+        )
+      : 100;
+  const totalLowStock = computed.reduce((sum, b) => sum + b.net.lowStock, 0);
+
+  if (snap.kpis.totalStockValueCr !== totalValueCr) {
+    snap.kpis.totalStockValueCr = totalValueCr;
+    changed = true;
+  }
+  if (snap.kpis.inventoryAccuracyPct !== weightedAcc) {
+    snap.kpis.inventoryAccuracyPct = weightedAcc;
+    changed = true;
+  }
+  if (snap.kpis.lowStockItems !== totalLowStock) {
+    snap.kpis.lowStockItems = totalLowStock;
+    changed = true;
+  }
+  if (snap.kpis.totalProducts !== totalSkus) {
+    snap.kpis.totalProducts = totalSkus;
+    changed = true;
+  }
+  snap.kpis.totalBranches = snap.locations.length;
+
+  return changed;
 }
 
 function hashPassword(password: string, existingSalt?: string): {salt: string; hash: string} {
@@ -106,6 +205,139 @@ function computeInitials(name: string): string {
   if (parts.length === 0) return 'OP';
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+}
+
+const MONTH_MAP: Record<string, string> = {
+  jan: '01',
+  feb: '02',
+  mar: '03',
+  apr: '04',
+  may: '05',
+  jun: '06',
+  jul: '07',
+  aug: '08',
+  sep: '09',
+  oct: '10',
+  nov: '11',
+  dec: '12',
+};
+
+function parseDateLabelToIsoServer(dateLabel?: string): string {
+  const todayIso = new Date().toISOString().slice(0, 10);
+  if (!dateLabel || dateLabel.trim().toLowerCase() === 'today') return todayIso;
+  const isoMatch = dateLabel.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) return dateLabel.trim();
+  const labelMatch = dateLabel.trim().match(/^(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{4})$/);
+  if (labelMatch) {
+    const day = labelMatch[1].padStart(2, '0');
+    const month = MONTH_MAP[labelMatch[2].slice(0, 3).toLowerCase()];
+    const year = labelMatch[3];
+    if (month) return `${year}-${month}-${day}`;
+  }
+  const parsed = new Date(dateLabel);
+  if (!Number.isNaN(parsed.getTime())) {
+    const y = parsed.getFullYear();
+    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+    const d = String(parsed.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return todayIso;
+}
+
+function extractBillNoSuffixServer(rawBillNo: string): string {
+  const trimmed = rawBillNo.trim();
+  const fullMatch = trimmed.match(/^PB-\d{2}-\d{4}-(.+)$/i);
+  if (fullMatch) return fullMatch[1].trim();
+  const legacyMatch = trimmed.match(/^PB-\d{4}-(.+)$/i);
+  if (legacyMatch) return legacyMatch[1].trim();
+  const pbPrefixMatch = trimmed.match(/^PB-(.+)$/i);
+  if (pbPrefixMatch) return pbPrefixMatch[1].trim();
+  return trimmed;
+}
+
+function formatPurchaseBillNoServer(
+  rawBillNo: string | undefined,
+  dateIso?: string,
+  dateLabel?: string,
+): string {
+  const resolvedIso =
+    dateIso && /^\d{4}-\d{2}-\d{2}$/.test(dateIso.trim())
+      ? dateIso.trim()
+      : parseDateLabelToIsoServer(dateLabel);
+  const [year, month] = resolvedIso.split('-');
+  const fallbackSuffix = String(Math.floor(1120 + Math.random() * 800));
+  const suffix = rawBillNo?.trim() ? extractBillNoSuffixServer(rawBillNo) : fallbackSuffix;
+  return `PB-${month}-${year}-${suffix || fallbackSuffix}`;
+}
+
+function formatInvoiceNoServer(rawInvoiceNo?: string): string {
+  const fallback = String(Math.floor(8850 + Math.random() * 900));
+  const trimmed = rawInvoiceNo?.trim() || '';
+  const suffix = trimmed.replace(/^INV-/i, '').trim() || fallback;
+  return `INV-${suffix}`;
+}
+
+function normalizeSalesItemStatusServer(raw?: string): SalesPaymentStatus {
+  if (raw === 'Paid' || raw === 'Partially Paid' || raw === 'Due') return raw;
+  if (raw === 'Dispatched' || raw === 'Partial') return 'Partially Paid';
+  return 'Due';
+}
+
+function computeSalesBillStatusServer(
+  items: Array<{amountInr: number; status: SalesPaymentStatus}>,
+): SalesPaymentStatus {
+  if (!items || items.length === 0) return 'Due';
+  if (items.every((it) => it.status === 'Paid')) return 'Paid';
+  if (items.every((it) => it.status === 'Due')) return 'Due';
+  const totalAmt = items.reduce((sum, it) => sum + Math.max(0, Number(it.amountInr) || 0), 0);
+  let paidWeight = 0;
+  let totalWeight = 0;
+  for (const it of items) {
+    const w = totalAmt > 0 ? Math.max(0, Number(it.amountInr) || 0) : 1;
+    totalWeight += w;
+    if (it.status === 'Paid') paidWeight += w;
+    else if (it.status === 'Partially Paid') paidWeight += w * 0.5;
+  }
+  const paidPct = totalWeight > 0 ? (paidWeight / totalWeight) * 100 : 0;
+  if (paidPct >= 100) return 'Paid';
+  if (paidPct < 50) return 'Due';
+  return 'Partially Paid';
+}
+
+function getPurchaseBillAmountServer(bill: PurchaseBill): number {
+  if (Array.isArray(bill.items) && bill.items.length > 0) {
+    return bill.items.reduce((sum, it) => sum + (Number(it.amountInr) || 0), 0);
+  }
+  return Number(bill.totalInr) || 0;
+}
+
+function syncSuppliersFromPurchaseBills(snapshot: InventorySnapshot): boolean {
+  if (!Array.isArray(snapshot.suppliers) || !Array.isArray(snapshot.purchaseBills)) {
+    return false;
+  }
+  let changed = false;
+  for (const sup of snapshot.suppliers) {
+    const supKey = sup.name.trim().toLowerCase();
+    let supplied = 0;
+    let payable = 0;
+    for (const bill of snapshot.purchaseBills) {
+      if (bill.supplierName.trim().toLowerCase() === supKey) {
+        const amt = getPurchaseBillAmountServer(bill);
+        supplied += amt;
+        if (bill.status === 'Pending') {
+          payable += amt;
+        } else if (bill.status === 'Partial') {
+          payable += Math.round(amt * 0.5);
+        }
+      }
+    }
+    if (sup.totalSuppliedInr !== supplied || sup.payableInr !== payable) {
+      sup.totalSuppliedInr = supplied;
+      sup.payableInr = payable;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 function buildInitialSnapshot(): InventorySnapshot {
@@ -474,7 +706,8 @@ function buildInitialSnapshot(): InventorySnapshot {
       thicknessMm: 18,
       branchName: 'Main Showroom',
       finish: 'Polished',
-      status: 'Available',
+      status: 'In Stock',
+      enabled: true,
     },
     {
       id: 'slb-2',
@@ -487,7 +720,8 @@ function buildInitialSnapshot(): InventorySnapshot {
       thicknessMm: 18,
       branchName: 'Main Showroom',
       finish: 'Polished',
-      status: 'Sold',
+      status: 'Out of Stock',
+      enabled: true,
     },
     {
       id: 'slb-3',
@@ -500,7 +734,8 @@ function buildInitialSnapshot(): InventorySnapshot {
       thicknessMm: 20,
       branchName: 'Marble Yard - North',
       finish: 'Polished',
-      status: 'Reserved',
+      status: 'In Stock',
+      enabled: true,
     },
     {
       id: 'slb-4',
@@ -513,7 +748,8 @@ function buildInitialSnapshot(): InventorySnapshot {
       thicknessMm: 18,
       branchName: 'Main Showroom',
       finish: 'Polished',
-      status: 'Available',
+      status: 'In Stock',
+      enabled: true,
     },
     {
       id: 'slb-5',
@@ -526,7 +762,8 @@ function buildInitialSnapshot(): InventorySnapshot {
       thicknessMm: 18,
       branchName: 'Slabs Godown - 2',
       finish: 'Polished',
-      status: 'In Cutting',
+      status: 'In Stock',
+      enabled: true,
     },
     {
       id: 'slb-6',
@@ -539,26 +776,48 @@ function buildInitialSnapshot(): InventorySnapshot {
       thicknessMm: 16,
       branchName: 'Slabs Godown - 1',
       finish: 'Honed',
-      status: 'Available',
+      status: 'In Stock',
+      enabled: true,
     },
   ];
 
   const purchaseBills: PurchaseBill[] = [
     {
       id: 'pb-1',
-      billNo: 'PB-2024-1104',
+      billNo: 'PB-04-2024-1104',
       supplierName: 'Kishangarh Marble Depot',
       branchName: 'Main Showroom',
-      itemSummary: 'Italian Statuario Slab',
+      itemSummary: 'Italian Statuario Slab + 1 more',
       qty: 4200,
       unit: 'sq. ft',
       totalInr: 2856000,
       status: 'Paid',
       dateLabel: '29 Apr 2024',
+      dateIso: '2024-04-29',
+      items: [
+        {
+          id: 'pbi-1a',
+          itemCode: 'MRB-SLB-10X5',
+          itemName: 'Italian Statuario Slab',
+          dimensions: '10 ft × 5 ft',
+          qty: 3000,
+          unit: 'sq. ft',
+          amountInr: 2100000,
+        },
+        {
+          id: 'pbi-1b',
+          itemCode: 'MRB-SLB-9X5',
+          itemName: 'Italian Statuario Slab',
+          dimensions: '9 ft × 5 ft',
+          qty: 1200,
+          unit: 'sq. ft',
+          amountInr: 756000,
+        },
+      ],
     },
     {
       id: 'pb-2',
-      billNo: 'PB-2024-1105',
+      billNo: 'PB-04-2024-1105',
       supplierName: 'Morbi Porcelain Works',
       branchName: 'Tile & Box Depot',
       itemSummary: 'Floor Tiles (Carrara Matte)',
@@ -567,10 +826,22 @@ function buildInitialSnapshot(): InventorySnapshot {
       totalInr: 544000,
       status: 'Pending',
       dateLabel: '28 Apr 2024',
+      dateIso: '2024-04-28',
+      items: [
+        {
+          id: 'pbi-2a',
+          itemCode: 'TIL-BOX-2X2',
+          itemName: 'Floor Tiles (Carrara Matte)',
+          dimensions: '2 ft × 2 ft',
+          qty: 320,
+          unit: 'box',
+          amountInr: 544000,
+        },
+      ],
     },
     {
       id: 'pb-3',
-      billNo: 'PB-2024-1106',
+      billNo: 'PB-04-2024-1106',
       supplierName: 'Ongole Granite Quarries',
       branchName: 'Marble Yard - North',
       itemSummary: 'Black Galaxy Granite',
@@ -579,10 +850,22 @@ function buildInitialSnapshot(): InventorySnapshot {
       totalInr: 1232000,
       status: 'Partial',
       dateLabel: '26 Apr 2024',
+      dateIso: '2024-04-26',
+      items: [
+        {
+          id: 'pbi-3a',
+          itemCode: 'GRN-SLB-10X6',
+          itemName: 'Black Galaxy Granite',
+          dimensions: '10 ft × 6 ft',
+          qty: 5600,
+          unit: 'sq. ft',
+          amountInr: 1232000,
+        },
+      ],
     },
     {
       id: 'pb-4',
-      billNo: 'PB-2024-1107',
+      billNo: 'PB-04-2024-1107',
       supplierName: 'Makrana Artisans Guild',
       branchName: 'Slabs Godown - 1',
       itemSummary: 'Makrana CNC Border',
@@ -591,6 +874,18 @@ function buildInitialSnapshot(): InventorySnapshot {
       totalInr: 184800,
       status: 'Paid',
       dateLabel: '24 Apr 2024',
+      dateIso: '2024-04-24',
+      items: [
+        {
+          id: 'pbi-4a',
+          itemCode: 'MRB-PCS-4X1',
+          itemName: 'Makrana CNC Border',
+          dimensions: '4 ft × 1 ft',
+          qty: 280,
+          unit: 'pcs',
+          amountInr: 184800,
+        },
+      ],
     },
   ];
 
@@ -599,30 +894,82 @@ function buildInitialSnapshot(): InventorySnapshot {
       id: 'sb-1',
       invoiceNo: 'INV-8841',
       customerName: 'Apex Horizon Builders',
+      customerPhone: '+91 98204 11420',
+      customerAddress: 'Plot 14, BKC Commercial Towers, Bandra East, Mumbai',
       branchName: 'Main Showroom',
-      itemSummary: 'Italian Statuario Slab',
+      itemSummary: 'Italian Statuario Slab + 1 more',
       qty: 2400,
       unit: 'sq. ft',
       totalInr: 1728000,
       status: 'Paid',
       dateLabel: '30 Apr 2024',
+      dateIso: '2024-04-30',
+      items: [
+        {
+          id: 'sbi-1a',
+          itemCode: 'MRB-SLB-10X5',
+          itemName: 'Italian Statuario Slab',
+          dimensions: '10 ft × 5 ft',
+          qty: 1600,
+          unit: 'sq. ft',
+          amountInr: 1184000,
+          status: 'Paid',
+        },
+        {
+          id: 'sbi-1b',
+          itemCode: 'MRB-SLB-9X5',
+          itemName: 'Italian Statuario Slab',
+          dimensions: '9 ft × 5 ft',
+          qty: 800,
+          unit: 'sq. ft',
+          amountInr: 544000,
+          status: 'Paid',
+        },
+      ],
     },
     {
       id: 'sb-2',
       invoiceNo: 'INV-8842',
       customerName: 'Studio Vastu Architects',
+      customerPhone: '+91 98112 77390',
+      customerAddress: '402 Design Plaza, Koregaon Park, Pune',
       branchName: 'Tile & Box Depot',
-      itemSummary: 'Roman Travertine Tile Box',
-      qty: 110,
+      itemSummary: 'Roman Travertine Tile Box + 1 more',
+      qty: 170,
       unit: 'box',
-      totalInr: 247500,
-      status: 'Dispatched',
+      totalInr: 358500,
+      status: 'Partially Paid',
       dateLabel: '29 Apr 2024',
+      dateIso: '2024-04-29',
+      items: [
+        {
+          id: 'sbi-2a',
+          itemCode: 'TRA-BOX-4X2',
+          itemName: 'Roman Travertine Tile Box',
+          dimensions: '4 ft × 2 ft',
+          qty: 110,
+          unit: 'box',
+          amountInr: 247500,
+          status: 'Paid',
+        },
+        {
+          id: 'sbi-2b',
+          itemCode: 'TIL-BOX-2X2',
+          itemName: 'Floor Tiles (Carrara Matte)',
+          dimensions: '2 ft × 2 ft',
+          qty: 60,
+          unit: 'box',
+          amountInr: 111000,
+          status: 'Due',
+        },
+      ],
     },
     {
       id: 'sb-3',
       invoiceNo: 'INV-8843',
       customerName: 'Mehta Residency Project',
+      customerPhone: '+91 97650 88211',
+      customerAddress: 'Site B, Ghodbunder Road, Thane West',
       branchName: 'Slabs Godown - 1',
       itemSummary: 'Absolute Black Step Riser',
       qty: 165,
@@ -630,11 +977,26 @@ function buildInitialSnapshot(): InventorySnapshot {
       totalInr: 89100,
       status: 'Due',
       dateLabel: '28 Apr 2024',
+      dateIso: '2024-04-28',
+      items: [
+        {
+          id: 'sbi-3a',
+          itemCode: 'GRN-PCS-4X1',
+          itemName: 'Absolute Black Step Riser',
+          dimensions: '4 ft × 0.5 ft',
+          qty: 165,
+          unit: 'pcs',
+          amountInr: 89100,
+          status: 'Due',
+        },
+      ],
     },
     {
       id: 'sb-4',
       invoiceNo: 'INV-8844',
       customerName: 'Kothari Villa Interiors',
+      customerPhone: '+91 98330 44105',
+      customerAddress: 'Villa 9, Palm Beach Enclave, Navi Mumbai',
       branchName: 'Slabs Godown - 2',
       itemSummary: 'Honey Onyx Backlit Slab',
       qty: 680,
@@ -642,6 +1004,19 @@ function buildInitialSnapshot(): InventorySnapshot {
       totalInr: 605200,
       status: 'Paid',
       dateLabel: '27 Apr 2024',
+      dateIso: '2024-04-27',
+      items: [
+        {
+          id: 'sbi-4a',
+          itemCode: 'ONX-SLB-8X5',
+          itemName: 'Honey Onyx Backlit Slab',
+          dimensions: '8 ft × 5 ft',
+          qty: 680,
+          unit: 'sq. ft',
+          amountInr: 605200,
+          status: 'Paid',
+        },
+      ],
     },
   ];
 
@@ -948,7 +1323,7 @@ function buildInitialSnapshot(): InventorySnapshot {
     },
   ];
 
-  return {
+  const initialSnap: InventorySnapshot = {
     domainVersion: DOMAIN_VERSION,
     dateRange: '01 Apr 2024 - 30 Apr 2024',
     lastUpdatedAt: new Date().toISOString(),
@@ -997,6 +1372,9 @@ function buildInitialSnapshot(): InventorySnapshot {
     alerts,
     transfers,
   };
+  syncSuppliersFromPurchaseBills(initialSnap);
+  syncLocationsFromLedger(initialSnap);
+  return initialSnap;
 }
 
 function loadStore(): StoreSchema {
@@ -1019,6 +1397,113 @@ function loadStore(): StoreSchema {
             u.facilityScope = 'All 7 Marble Showrooms, Yards & Depots';
           }
           fs.writeFileSync(STORE_PATH, JSON.stringify(parsed, null, 2));
+        } else if (Array.isArray(parsed.snapshot.slabs)) {
+          let migratedSlabs = false;
+          for (const s of parsed.snapshot.slabs) {
+            const rawStatus = s.status as string;
+            if (rawStatus !== 'In Stock' && rawStatus !== 'Out of Stock') {
+              s.status = rawStatus === 'Sold' ? 'Out of Stock' : 'In Stock';
+              migratedSlabs = true;
+            }
+            if (s.enabled === undefined) {
+              s.enabled = true;
+              migratedSlabs = true;
+            }
+          }
+          if (Array.isArray(parsed.snapshot.purchaseBills)) {
+            for (const b of parsed.snapshot.purchaseBills) {
+              if (!b.dateIso) {
+                b.dateIso = parseDateLabelToIsoServer(b.dateLabel);
+                migratedSlabs = true;
+              }
+              if (!/^PB-\d{2}-\d{4}-.+$/i.test(b.billNo)) {
+                b.billNo = formatPurchaseBillNoServer(b.billNo, b.dateIso, b.dateLabel);
+                migratedSlabs = true;
+              }
+              if (!Array.isArray(b.items) || b.items.length === 0) {
+                b.items = [
+                  {
+                    id: `pbi-${b.id}`,
+                    itemCode: '',
+                    itemName: b.itemSummary,
+                    dimensions: 'Standard',
+                    qty: b.qty,
+                    unit: b.unit,
+                    amountInr: b.totalInr,
+                  },
+                ];
+                migratedSlabs = true;
+              }
+            }
+          }
+          if (Array.isArray(parsed.snapshot.salesBills)) {
+            for (const sb of parsed.snapshot.salesBills) {
+              const normalizedSbStatus = normalizeSalesItemStatusServer(sb.status as string);
+              if (sb.status !== normalizedSbStatus) {
+                sb.status = normalizedSbStatus;
+                migratedSlabs = true;
+              }
+              if (!sb.dateIso) {
+                sb.dateIso = parseDateLabelToIsoServer(sb.dateLabel);
+                migratedSlabs = true;
+              }
+              if (!/^INV-.+$/i.test(sb.invoiceNo)) {
+                sb.invoiceNo = formatInvoiceNoServer(sb.invoiceNo);
+                migratedSlabs = true;
+              }
+              if (sb.customerPhone === undefined) {
+                const matchedCust = parsed.snapshot.customers?.find(
+                  (c) => c.name.toLowerCase() === sb.customerName.toLowerCase(),
+                );
+                sb.customerPhone = matchedCust?.phone || '';
+                migratedSlabs = true;
+              }
+              if (sb.customerAddress === undefined) {
+                const matchedCust = parsed.snapshot.customers?.find(
+                  (c) => c.name.toLowerCase() === sb.customerName.toLowerCase(),
+                );
+                sb.customerAddress = matchedCust?.city ? `${matchedCust.city}, Maharashtra` : '';
+                migratedSlabs = true;
+              }
+              if (!Array.isArray(sb.items) || sb.items.length === 0) {
+                sb.items = [
+                  {
+                    id: `sbi-${sb.id}`,
+                    itemCode: '',
+                    itemName: sb.itemSummary,
+                    dimensions: 'Standard',
+                    qty: sb.qty,
+                    unit: sb.unit,
+                    amountInr: sb.totalInr,
+                    status: normalizedSbStatus,
+                  },
+                ];
+                migratedSlabs = true;
+              } else {
+                const recomputed = computeSalesBillStatusServer(sb.items);
+                if (sb.status !== recomputed) {
+                  sb.status = recomputed;
+                  migratedSlabs = true;
+                }
+              }
+            }
+          }
+          if (syncSuppliersFromPurchaseBills(parsed.snapshot)) {
+            migratedSlabs = true;
+          }
+          if (syncLocationsFromLedger(parsed.snapshot)) {
+            migratedSlabs = true;
+          }
+          for (const uid of Object.keys(parsed.layouts)) {
+            const {layout: sanitized, changed} = sanitizeLayoutServer(parsed.layouts[uid]);
+            if (changed) {
+              parsed.layouts[uid] = sanitized;
+              migratedSlabs = true;
+            }
+          }
+          if (migratedSlabs) {
+            fs.writeFileSync(STORE_PATH, JSON.stringify(parsed, null, 2));
+          }
         }
         return parsed;
       }
@@ -1057,6 +1542,7 @@ const store = loadStore();
 
 function saveStore() {
   try {
+    syncLocationsFromLedger(store.snapshot);
     fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
   } catch (err) {
     console.error('Failed to persist store:', err);
@@ -1157,65 +1643,16 @@ function broadcastSnapshot() {
   }
 }
 
-// Live telemetry updates for marble sq. ft, pieces, and box stock movements
-let tickCounter = 0;
+// Keep live SSE connection fresh without mutating ledger-calculated branch inventory values
 setInterval(() => {
-  tickCounter += 1;
   const snap = store.snapshot;
-  const locIdx = tickCounter % snap.locations.length;
-  const targetLoc = snap.locations[locIdx];
-
-  const sqftDelta = Math.round(Math.sin(tickCounter * 1.2) * 140);
-  const pcsDelta = Math.round(Math.cos(tickCounter * 0.9) * 12);
-  const boxDelta = Math.round(Math.sin(tickCounter * 0.6) * 6);
-
-  targetLoc.sqftQty = Math.max(2000, targetLoc.sqftQty + sqftDelta);
-  targetLoc.pcsQty = Math.max(80, targetLoc.pcsQty + pcsDelta);
-  targetLoc.boxQty = Math.max(25, targetLoc.boxQty + boxDelta);
-
-  const valShift = Number(((sqftDelta * 360 + pcsDelta * 550 + boxDelta * 1900) / 10000000).toFixed(3));
-  targetLoc.stockValueCr = Number(Math.max(0.8, targetLoc.stockValueCr + valShift).toFixed(2));
-  const accShift = Number((Math.sin(tickCounter * 0.9) * 0.04).toFixed(2));
-  targetLoc.inventoryAccuracyPct = Number(
-    Math.min(99.95, Math.max(96.5, targetLoc.inventoryAccuracyPct + accShift)).toFixed(2),
-  );
-  targetLoc.lastAuditAt = 'Live sync just now';
-
-  const totalStockValueCr = Number(
-    snap.locations.reduce((sum, l) => sum + l.stockValueCr, 0).toFixed(2),
-  );
-  const avgAcc = Number(
-    (
-      snap.locations.reduce((sum, l) => sum + l.inventoryAccuracyPct * l.totalItems, 0) /
-      snap.locations.reduce((sum, l) => sum + l.totalItems, 0)
-    ).toFixed(2),
-  );
-
-  snap.kpis.totalStockValueCr = totalStockValueCr;
-  snap.kpis.inventoryAccuracyPct = avgAcc;
-  snap.kpis.stockInTransitCr = Number(
-    Math.max(0.95, 1.48 + Math.sin(tickCounter * 0.5) * 0.06).toFixed(2),
-  );
-
-  snap.accuracyBreakdown.accuratePct = avgAcc;
-  const remaining = Number((100 - avgAcc).toFixed(2));
-  snap.accuracyBreakdown.minorVariancePct = Number((remaining * 0.88).toFixed(2));
-  snap.accuracyBreakdown.majorVariancePct = Number(
-    Math.max(0.05, remaining - snap.accuracyBreakdown.minorVariancePct).toFixed(2),
-  );
-
-  const lastTrend = snap.trends[snap.trends.length - 1];
-  if (lastTrend) {
-    lastTrend.valueCr = totalStockValueCr;
-    lastTrend.accuracyPct = avgAcc;
-  }
-
+  syncLocationsFromLedger(snap);
   snap.lastUpdatedAt = new Date().toISOString();
 
   if (sseClients.size > 0) {
     broadcastSnapshot();
   }
-}, 3500);
+}, 5000);
 
 async function startServer() {
   const app = express();
@@ -1329,6 +1766,12 @@ async function startServer() {
     if (!store.layouts[user.id]) {
       store.layouts[user.id] = createDefaultLayout();
       saveStore();
+    } else {
+      const {layout: sanitized, changed} = sanitizeLayoutServer(store.layouts[user.id]);
+      if (changed) {
+        store.layouts[user.id] = sanitized;
+        saveStore();
+      }
     }
     res.json({layout: store.layouts[user.id]});
   });
@@ -1718,6 +2161,7 @@ async function startServer() {
 
   app.post('/api/inventory/slabs', requireAuth, (req: Request, res: Response) => {
     const {
+      lotNumber,
       stoneName,
       category,
       dimensionsFt,
@@ -1726,28 +2170,53 @@ async function startServer() {
       thicknessMm,
       branchName,
       finish,
+      status,
     } = req.body as Partial<SlabLot>;
-    if (!stoneName?.trim() || !slabCountPcs || !totalSqFt || !branchName) {
-      res.status(400).json({error: 'Stone name, slab pcs, total sq. ft, and branch are required.'});
+    if (!stoneName?.trim() || !totalSqFt || totalSqFt <= 0 || !branchName) {
+      res.status(400).json({error: 'Product name, area (sq. ft), and branch are required.'});
       return;
     }
-    const nextIdx = store.snapshot.slabs.length + 1;
+
+    let resolvedLotNumber = lotNumber?.trim().toUpperCase();
+    if (!resolvedLotNumber) {
+      let nextIdx = store.snapshot.slabs.length + 1;
+      while (
+        store.snapshot.slabs.some(
+          (s) => s.lotNumber.toUpperCase() === `SL-${String(nextIdx).padStart(3, '0')}`,
+        )
+      ) {
+        nextIdx += 1;
+      }
+      resolvedLotNumber = `SL-${String(nextIdx).padStart(3, '0')}`;
+    } else if (
+      store.snapshot.slabs.some((s) => s.lotNumber.toUpperCase() === resolvedLotNumber)
+    ) {
+      res.status(409).json({
+        error: `Slab ID ${resolvedLotNumber} already exists. Please use a unique Slab ID.`,
+      });
+      return;
+    }
+
+    const normalizedStatus: SlabLot['status'] =
+      status === 'Out of Stock' ? 'Out of Stock' : 'In Stock';
+
     const slab: SlabLot = {
       id: `slb-${crypto.randomUUID().slice(0, 6)}`,
-      lotNumber: `SL-${String(nextIdx).padStart(3, '0')}`,
+      lotNumber: resolvedLotNumber,
       stoneName: stoneName.trim(),
       category: category || 'Marble',
       dimensionsFt: dimensionsFt?.trim() || '10 × 5 ft',
-      slabCountPcs: Math.round(slabCountPcs),
-      totalSqFt: Math.round(totalSqFt),
-      thicknessMm: thicknessMm || 18,
+      slabCountPcs: Math.max(1, Math.round(slabCountPcs || 1)),
+      totalSqFt: Number(Number(totalSqFt).toFixed(2)),
+      thicknessMm: Math.max(1, Math.round(Number(thicknessMm) || 18)),
       branchName,
       finish: finish || 'Polished',
-      status: 'Available',
+      status: normalizedStatus,
+      enabled: true,
     };
     store.snapshot.slabs = [slab, ...store.snapshot.slabs];
     const loc = store.snapshot.locations.find((l) => l.name === branchName);
-    if (loc) {
+    if (loc && normalizedStatus === 'In Stock') {
       loc.sqftQty += slab.totalSqFt;
       loc.pcsQty += slab.slabCountPcs;
     }
@@ -1760,9 +2229,9 @@ async function startServer() {
       quantityDelta: slab.totalSqFt,
       unit: 'sq. ft',
       systemAfter: slab.totalSqFt,
-      physicalAfter: slab.totalSqFt,
+      physicalAfter: normalizedStatus === 'Out of Stock' ? 0 : slab.totalSqFt,
       branchName: slab.branchName,
-      partyOrNote: `Registered slab ${slab.lotNumber} (${slab.stoneName} ${slab.dimensionsFt})`,
+      partyOrNote: `Registered slab ${slab.lotNumber} (${slab.stoneName} ${slab.dimensionsFt} · ${slab.status})`,
       timestampLabel: 'Just now',
     });
 
@@ -1788,6 +2257,7 @@ async function startServer() {
       branchName,
       finish,
       status,
+      enabled,
     } = req.body as Partial<SlabLot>;
 
     if (stoneName?.trim()) slab.stoneName = stoneName.trim();
@@ -1797,24 +2267,25 @@ async function startServer() {
       slab.slabCountPcs = Math.round(slabCountPcs);
     }
     if (typeof totalSqFt === 'number' && totalSqFt > 0) {
-      slab.totalSqFt = Math.round(totalSqFt);
+      slab.totalSqFt = Number(totalSqFt.toFixed(2));
     }
     if (typeof thicknessMm === 'number' && thicknessMm > 0) {
       slab.thicknessMm = Math.round(thicknessMm);
     }
     if (branchName?.trim()) slab.branchName = branchName.trim();
     if (finish) slab.finish = finish;
-    if (status) slab.status = status;
+    if (status === 'In Stock' || status === 'Out of Stock') slab.status = status;
+    if (typeof enabled === 'boolean') slab.enabled = enabled;
 
     pushHistory({
       itemId: slab.id,
       itemCode: slab.lotNumber,
-      type: slab.status === 'Sold' ? 'Sale' : 'Adjustment',
+      type: slab.status === 'Out of Stock' ? 'Sale' : 'Adjustment',
       referenceNo: `SLB-${slab.lotNumber}`,
       quantityDelta: 0,
       unit: 'sq. ft',
       systemAfter: slab.totalSqFt,
-      physicalAfter: slab.status === 'Sold' ? 0 : slab.totalSqFt,
+      physicalAfter: slab.status === 'Out of Stock' ? 0 : slab.totalSqFt,
       branchName: slab.branchName,
       partyOrNote: `Slab updated (${slab.stoneName} · ${slab.dimensionsFt} · Status: ${slab.status})`,
       timestampLabel: 'Just now',
@@ -1826,124 +2297,675 @@ async function startServer() {
     res.json({slab, snapshot: store.snapshot});
   });
 
+  app.patch('/api/inventory/slabs/:id/toggle', requireAuth, (req: Request, res: Response) => {
+    const slab = store.snapshot.slabs.find((s) => s.id === req.params.id);
+    if (!slab) {
+      res.status(404).json({error: 'Slab record not found.'});
+      return;
+    }
+    const nextEnabled = slab.enabled === false;
+    slab.enabled = nextEnabled;
+
+    pushHistory({
+      itemId: slab.id,
+      itemCode: slab.lotNumber,
+      type: 'Adjustment',
+      referenceNo: `${nextEnabled ? 'ENB' : 'DSB'}-${slab.lotNumber}`,
+      quantityDelta: 0,
+      unit: 'sq. ft',
+      systemAfter: slab.totalSqFt,
+      physicalAfter: slab.status === 'Out of Stock' ? 0 : slab.totalSqFt,
+      branchName: slab.branchName,
+      partyOrNote: `Slab ${nextEnabled ? 'enabled' : 'disabled'} in register`,
+      timestampLabel: 'Just now',
+    });
+
+    store.snapshot.lastUpdatedAt = new Date().toISOString();
+    saveStore();
+    broadcastSnapshot();
+    res.json({slab, snapshot: store.snapshot});
+  });
+
+  app.delete('/api/inventory/slabs/:id', requireAuth, (req: Request, res: Response) => {
+    const idx = store.snapshot.slabs.findIndex((s) => s.id === req.params.id);
+    if (idx === -1) {
+      res.status(404).json({error: 'Slab record not found.'});
+      return;
+    }
+    const [removed] = store.snapshot.slabs.splice(idx, 1);
+    const loc = store.snapshot.locations.find((l) => l.name === removed.branchName);
+    if (loc && removed.status === 'In Stock') {
+      loc.sqftQty = Math.max(0, loc.sqftQty - removed.totalSqFt);
+      loc.pcsQty = Math.max(0, loc.pcsQty - removed.slabCountPcs);
+    }
+
+    store.snapshot.lastUpdatedAt = new Date().toISOString();
+    saveStore();
+    broadcastSnapshot();
+    res.json({
+      deletedId: removed.id,
+      lotNumber: removed.lotNumber,
+      snapshot: store.snapshot,
+    });
+  });
+
   app.post('/api/inventory/purchase-bills', requireAuth, (req: Request, res: Response) => {
-    const {supplierName, branchName, itemCode, qty, unit, totalInr} = req.body as {
+    const body = req.body as {
+      billNo?: string;
       supplierName?: string;
       branchName?: string;
+      status?: PurchaseBill['status'];
+      dateLabel?: string;
+      dateIso?: string;
+      items?: Array<{
+        itemCode?: string;
+        qty?: number;
+        unit?: UnitType;
+        amountInr?: number;
+      }>;
+      // Legacy single-item fallback fields
       itemCode?: string;
       qty?: number;
       unit?: UnitType;
       totalInr?: number;
     };
-    if (!supplierName || !branchName || !itemCode || !qty || qty <= 0 || !unit) {
-      res.status(400).json({error: 'Supplier, branch, item, unit, and positive qty required.'});
+
+    const {billNo, supplierName, branchName, status, dateLabel, dateIso} = body;
+    const rawItems =
+      Array.isArray(body.items) && body.items.length > 0
+        ? body.items
+        : body.itemCode
+          ? [
+              {
+                itemCode: body.itemCode,
+                qty: body.qty,
+                unit: body.unit,
+                amountInr: body.totalInr,
+              },
+            ]
+          : [];
+
+    if (!supplierName?.trim() || !branchName?.trim() || rawItems.length === 0) {
+      res.status(400).json({error: 'Supplier, branch, and at least one bill item are required.'});
       return;
     }
-    const item = store.snapshot.varianceItems.find((i) => i.itemCode === itemCode);
-    const bill: PurchaseBill = {
-      id: `pb-${crypto.randomUUID().slice(0, 6)}`,
-      billNo: `PB-2024-${Math.floor(1120 + Math.random() * 800)}`,
-      supplierName,
-      branchName,
-      itemSummary: item ? `${item.itemName} (${item.dimensions})` : itemCode,
-      qty: Math.round(qty),
-      unit,
-      totalInr: Math.round(totalInr || qty * (item?.unitPriceInr || 450)),
-      status: 'Pending',
-      dateLabel: 'Today',
-    };
-    store.snapshot.purchaseBills = [bill, ...store.snapshot.purchaseBills];
-    if (item) {
-      // Purchase bill adds strictly to System Stock; Variance = Physical - System updates accordingly
-      item.systemQty += bill.qty;
-      recomputeItemMetrics(item);
-      item.lastCountedAt = 'Purchase bill posted';
 
-      pushHistory({
-        itemId: item.id,
-        itemCode: item.itemCode,
-        type: 'Purchase',
-        referenceNo: bill.billNo,
-        quantityDelta: bill.qty,
-        unit: bill.unit,
-        systemAfter: item.systemQty,
-        physicalAfter: item.physicalQty,
-        branchName,
-        partyOrNote: `${supplierName} (Added to System Stock)`,
-        timestampLabel: 'Just now',
+    const normalizedItems: PurchaseBillItem[] = [];
+    for (const raw of rawItems) {
+      if (!raw.itemCode || !raw.qty || raw.qty <= 0 || !raw.unit) {
+        res.status(400).json({error: 'Every item requires a product, positive qty, and unit.'});
+        return;
+      }
+      const matched = store.snapshot.varianceItems.find((i) => i.itemCode === raw.itemCode);
+      const qtyRounded = Math.round(raw.qty);
+      const amountRounded = Math.max(
+        0,
+        Math.round(
+          raw.amountInr !== undefined && !Number.isNaN(Number(raw.amountInr))
+            ? Number(raw.amountInr)
+            : qtyRounded * (matched?.unitPriceInr || 450),
+        ),
+      );
+      normalizedItems.push({
+        id: `pbi-${crypto.randomUUID().slice(0, 6)}`,
+        itemCode: raw.itemCode,
+        itemName: matched ? matched.itemName : raw.itemCode,
+        dimensions: matched ? matched.dimensions : 'Standard',
+        qty: qtyRounded,
+        unit: raw.unit,
+        amountInr: amountRounded,
       });
     }
-    const loc = store.snapshot.locations.find((l) => l.name === branchName);
+
+    const totalInr = normalizedItems.reduce((sum, it) => sum + it.amountInr, 0);
+    const totalQty = normalizedItems.reduce((sum, it) => sum + it.qty, 0);
+    const firstItem = normalizedItems[0];
+    const itemSummary =
+      normalizedItems.length === 1
+        ? `${firstItem.itemName} (${firstItem.dimensions})`
+        : `${firstItem.itemName} + ${normalizedItems.length - 1} more`;
+    const normalizedStatus: PurchaseBill['status'] =
+      status === 'Paid' || status === 'Pending' || status === 'Partial' ? status : 'Pending';
+    const resolvedIso =
+      dateIso && /^\d{4}-\d{2}-\d{2}$/.test(dateIso.trim())
+        ? dateIso.trim()
+        : parseDateLabelToIsoServer(dateLabel);
+    const formattedBillNo = formatPurchaseBillNoServer(billNo, resolvedIso, dateLabel);
+
+    const bill: PurchaseBill = {
+      id: `pb-${crypto.randomUUID().slice(0, 6)}`,
+      billNo: formattedBillNo,
+      supplierName: supplierName.trim(),
+      branchName: branchName.trim(),
+      itemSummary,
+      qty: totalQty,
+      unit: firstItem.unit,
+      totalInr,
+      status: normalizedStatus,
+      dateLabel: dateLabel?.trim() || 'Today',
+      dateIso: resolvedIso,
+      items: normalizedItems,
+    };
+
+    store.snapshot.purchaseBills = [bill, ...store.snapshot.purchaseBills];
+    const loc = store.snapshot.locations.find((l) => l.name === bill.branchName);
+
+    for (const line of normalizedItems) {
+      const item = store.snapshot.varianceItems.find((i) => i.itemCode === line.itemCode);
+      if (item) {
+        // Purchase bill adds strictly to System Stock; Variance = Physical - System updates accordingly
+        item.systemQty += line.qty;
+        recomputeItemMetrics(item);
+        item.lastCountedAt = 'Purchase bill posted';
+
+        pushHistory({
+          itemId: item.id,
+          itemCode: item.itemCode,
+          type: 'Purchase',
+          referenceNo: bill.billNo,
+          quantityDelta: line.qty,
+          unit: line.unit,
+          systemAfter: item.systemQty,
+          physicalAfter: item.physicalQty,
+          branchName: bill.branchName,
+          partyOrNote: `${bill.supplierName} (Added to System Stock)`,
+          timestampLabel: 'Just now',
+        });
+      }
+      if (loc) {
+        if (line.unit === 'sq. ft') loc.sqftQty += line.qty;
+        if (line.unit === 'pcs') loc.pcsQty += line.qty;
+        if (line.unit === 'box') loc.boxQty += line.qty;
+      }
+    }
+
     if (loc) {
-      if (unit === 'sq. ft') loc.sqftQty += bill.qty;
-      if (unit === 'pcs') loc.pcsQty += bill.qty;
-      if (unit === 'box') loc.boxQty += bill.qty;
       loc.stockValueCr = Number((loc.stockValueCr + bill.totalInr / 10000000).toFixed(2));
     }
+
+    syncSuppliersFromPurchaseBills(store.snapshot);
     store.snapshot.lastUpdatedAt = new Date().toISOString();
     saveStore();
     broadcastSnapshot();
     res.status(201).json({bill, snapshot: store.snapshot});
   });
 
-  app.post('/api/inventory/sales-bills', requireAuth, (req: Request, res: Response) => {
-    const {customerName, branchName, itemCode, qty, unit, totalInr} = req.body as {
-      customerName?: string;
+  app.put('/api/inventory/purchase-bills/:id', requireAuth, (req: Request, res: Response) => {
+    const billIndex = store.snapshot.purchaseBills.findIndex((b) => b.id === req.params.id);
+    if (billIndex === -1) {
+      res.status(404).json({error: 'Purchase bill not found.'});
+      return;
+    }
+
+    const existing = store.snapshot.purchaseBills[billIndex];
+    const body = req.body as {
+      billNo?: string;
+      supplierName?: string;
       branchName?: string;
+      status?: PurchaseBill['status'];
+      dateLabel?: string;
+      dateIso?: string;
+      items?: Array<{
+        itemCode?: string;
+        qty?: number;
+        unit?: UnitType;
+        amountInr?: number;
+      }>;
+    };
+
+    const {billNo, supplierName, branchName, status, dateLabel, dateIso, items} = body;
+    if (
+      !supplierName?.trim() ||
+      !branchName?.trim() ||
+      !Array.isArray(items) ||
+      items.length === 0
+    ) {
+      res.status(400).json({error: 'Supplier, branch, and at least one bill item are required.'});
+      return;
+    }
+
+    const normalizedItems: PurchaseBillItem[] = [];
+    for (const raw of items) {
+      if (!raw.itemCode || !raw.qty || raw.qty <= 0 || !raw.unit) {
+        res.status(400).json({error: 'Every item requires a product, positive qty, and unit.'});
+        return;
+      }
+      const matched = store.snapshot.varianceItems.find((i) => i.itemCode === raw.itemCode);
+      const qtyRounded = Math.round(raw.qty);
+      const amountRounded = Math.max(
+        0,
+        Math.round(
+          raw.amountInr !== undefined && !Number.isNaN(Number(raw.amountInr))
+            ? Number(raw.amountInr)
+            : qtyRounded * (matched?.unitPriceInr || 450),
+        ),
+      );
+      normalizedItems.push({
+        id: `pbi-${crypto.randomUUID().slice(0, 6)}`,
+        itemCode: raw.itemCode,
+        itemName: matched ? matched.itemName : raw.itemCode,
+        dimensions: matched ? matched.dimensions : 'Standard',
+        qty: qtyRounded,
+        unit: raw.unit,
+        amountInr: amountRounded,
+      });
+    }
+
+    // Reverse old stock impact
+    const prevItems =
+      Array.isArray(existing.items) && existing.items.length > 0 ? existing.items : [];
+    const oldLoc = store.snapshot.locations.find((l) => l.name === existing.branchName);
+    for (const oldLine of prevItems) {
+      const oldItem = oldLine.itemCode
+        ? store.snapshot.varianceItems.find((i) => i.itemCode === oldLine.itemCode)
+        : store.snapshot.varianceItems.find(
+            (i) => i.itemName.toLowerCase() === oldLine.itemName.toLowerCase(),
+          );
+      if (oldItem) {
+        oldItem.systemQty = Math.max(0, oldItem.systemQty - oldLine.qty);
+        recomputeItemMetrics(oldItem);
+      }
+      if (oldLoc) {
+        if (oldLine.unit === 'sq. ft') oldLoc.sqftQty = Math.max(0, oldLoc.sqftQty - oldLine.qty);
+        if (oldLine.unit === 'pcs') oldLoc.pcsQty = Math.max(0, oldLoc.pcsQty - oldLine.qty);
+        if (oldLine.unit === 'box') oldLoc.boxQty = Math.max(0, oldLoc.boxQty - oldLine.qty);
+      }
+    }
+    if (oldLoc) {
+      oldLoc.stockValueCr = Number(
+        Math.max(0.5, oldLoc.stockValueCr - existing.totalInr / 10000000).toFixed(2),
+      );
+    }
+
+    const totalInr = normalizedItems.reduce((sum, it) => sum + it.amountInr, 0);
+    const totalQty = normalizedItems.reduce((sum, it) => sum + it.qty, 0);
+    const firstItem = normalizedItems[0];
+    const itemSummary =
+      normalizedItems.length === 1
+        ? `${firstItem.itemName} (${firstItem.dimensions})`
+        : `${firstItem.itemName} + ${normalizedItems.length - 1} more`;
+    const normalizedStatus: PurchaseBill['status'] =
+      status === 'Paid' || status === 'Pending' || status === 'Partial'
+        ? status
+        : existing.status;
+    const resolvedIso =
+      dateIso && /^\d{4}-\d{2}-\d{2}$/.test(dateIso.trim())
+        ? dateIso.trim()
+        : parseDateLabelToIsoServer(dateLabel || existing.dateLabel);
+    const formattedBillNo = formatPurchaseBillNoServer(
+      billNo?.trim() || existing.billNo,
+      resolvedIso,
+      dateLabel || existing.dateLabel,
+    );
+
+    const updatedBill: PurchaseBill = {
+      ...existing,
+      billNo: formattedBillNo,
+      supplierName: supplierName.trim(),
+      branchName: branchName.trim(),
+      itemSummary,
+      qty: totalQty,
+      unit: firstItem.unit,
+      totalInr,
+      status: normalizedStatus,
+      dateLabel: dateLabel?.trim() || existing.dateLabel,
+      dateIso: resolvedIso,
+      items: normalizedItems,
+    };
+
+    store.snapshot.purchaseBills[billIndex] = updatedBill;
+
+    // Apply new stock impact
+    const newLoc = store.snapshot.locations.find((l) => l.name === updatedBill.branchName);
+    for (const line of normalizedItems) {
+      const item = store.snapshot.varianceItems.find((i) => i.itemCode === line.itemCode);
+      if (item) {
+        item.systemQty += line.qty;
+        recomputeItemMetrics(item);
+        item.lastCountedAt = 'Purchase bill updated';
+
+        pushHistory({
+          itemId: item.id,
+          itemCode: item.itemCode,
+          type: 'Purchase',
+          referenceNo: updatedBill.billNo,
+          quantityDelta: line.qty,
+          unit: line.unit,
+          systemAfter: item.systemQty,
+          physicalAfter: item.physicalQty,
+          branchName: updatedBill.branchName,
+          partyOrNote: `${updatedBill.supplierName} (Purchase bill edited)`,
+          timestampLabel: 'Just now',
+        });
+      }
+      if (newLoc) {
+        if (line.unit === 'sq. ft') newLoc.sqftQty += line.qty;
+        if (line.unit === 'pcs') newLoc.pcsQty += line.qty;
+        if (line.unit === 'box') newLoc.boxQty += line.qty;
+      }
+    }
+    if (newLoc) {
+      newLoc.stockValueCr = Number(
+        (newLoc.stockValueCr + updatedBill.totalInr / 10000000).toFixed(2),
+      );
+    }
+
+    syncSuppliersFromPurchaseBills(store.snapshot);
+    store.snapshot.lastUpdatedAt = new Date().toISOString();
+    saveStore();
+    broadcastSnapshot();
+    res.json({bill: updatedBill, snapshot: store.snapshot});
+  });
+
+  app.post('/api/inventory/sales-bills', requireAuth, (req: Request, res: Response) => {
+    const body = req.body as {
+      invoiceNo?: string;
+      customerName?: string;
+      customerPhone?: string;
+      customerAddress?: string;
+      branchName?: string;
+      dateLabel?: string;
+      dateIso?: string;
+      items?: Array<{
+        itemCode?: string;
+        qty?: number;
+        unit?: UnitType;
+        amountInr?: number;
+        status?: SalesPaymentStatus;
+      }>;
+      // Legacy single-item fallback
       itemCode?: string;
       qty?: number;
       unit?: UnitType;
       totalInr?: number;
     };
-    if (!customerName || !branchName || !itemCode || !qty || qty <= 0 || !unit) {
-      res.status(400).json({error: 'Customer, branch, item, unit, and positive qty required.'});
+
+    const {invoiceNo, customerName, customerPhone, customerAddress, branchName, dateLabel, dateIso} =
+      body;
+    const rawItems =
+      Array.isArray(body.items) && body.items.length > 0
+        ? body.items
+        : body.itemCode
+          ? [
+              {
+                itemCode: body.itemCode,
+                qty: body.qty,
+                unit: body.unit,
+                amountInr: body.totalInr,
+                status: 'Paid' as SalesPaymentStatus,
+              },
+            ]
+          : [];
+
+    if (!customerName?.trim() || !branchName?.trim() || rawItems.length === 0) {
+      res
+        .status(400)
+        .json({error: 'Customer name, branch, and at least one invoice item are required.'});
       return;
     }
-    const item = store.snapshot.varianceItems.find((i) => i.itemCode === itemCode);
-    const bill: SalesBill = {
-      id: `sb-${crypto.randomUUID().slice(0, 6)}`,
-      invoiceNo: `INV-${Math.floor(8850 + Math.random() * 900)}`,
-      customerName,
-      branchName,
-      itemSummary: item ? `${item.itemName} (${item.dimensions})` : itemCode,
-      qty: Math.round(qty),
-      unit,
-      totalInr: Math.round(totalInr || qty * (item?.unitPriceInr || 500)),
-      status: 'Dispatched',
-      dateLabel: 'Today',
-    };
-    store.snapshot.salesBills = [bill, ...store.snapshot.salesBills];
-    if (item) {
-      // Sales bill subtracts qty from System Stock AND updates/subtracts Physical Stock
-      item.systemQty = Math.max(0, item.systemQty - bill.qty);
-      item.physicalQty = Math.max(0, item.physicalQty - bill.qty);
-      recomputeItemMetrics(item);
-      item.lastCountedAt = 'Sales bill dispatched';
 
-      pushHistory({
-        itemId: item.id,
-        itemCode: item.itemCode,
-        type: 'Sale',
-        referenceNo: bill.invoiceNo,
-        quantityDelta: -bill.qty,
-        unit: bill.unit,
-        systemAfter: item.systemQty,
-        physicalAfter: item.physicalQty,
-        branchName,
-        partyOrNote: `${customerName} (Subtracted from System & Physical)`,
-        timestampLabel: 'Just now',
+    const normalizedItems: SalesBillItem[] = [];
+    for (const raw of rawItems) {
+      if (!raw.itemCode || !raw.qty || raw.qty <= 0 || !raw.unit) {
+        res.status(400).json({error: 'Every item requires a product, positive qty, and unit.'});
+        return;
+      }
+      const matched = store.snapshot.varianceItems.find((i) => i.itemCode === raw.itemCode);
+      const qtyRounded = Math.round(raw.qty);
+      const amountRounded = Math.max(
+        0,
+        Math.round(
+          raw.amountInr !== undefined && !Number.isNaN(Number(raw.amountInr))
+            ? Number(raw.amountInr)
+            : qtyRounded * (matched?.unitPriceInr || 500),
+        ),
+      );
+      normalizedItems.push({
+        id: `sbi-${crypto.randomUUID().slice(0, 6)}`,
+        itemCode: raw.itemCode,
+        itemName: matched ? matched.itemName : raw.itemCode,
+        dimensions: matched ? matched.dimensions : 'Standard',
+        qty: qtyRounded,
+        unit: raw.unit,
+        amountInr: amountRounded,
+        status: normalizeSalesItemStatusServer(raw.status),
       });
     }
-    const loc = store.snapshot.locations.find((l) => l.name === branchName);
-    if (loc) {
-      if (unit === 'sq. ft') loc.sqftQty = Math.max(0, loc.sqftQty - bill.qty);
-      if (unit === 'pcs') loc.pcsQty = Math.max(0, loc.pcsQty - bill.qty);
-      if (unit === 'box') loc.boxQty = Math.max(0, loc.boxQty - bill.qty);
+
+    const totalInr = normalizedItems.reduce((sum, it) => sum + it.amountInr, 0);
+    const totalQty = normalizedItems.reduce((sum, it) => sum + it.qty, 0);
+    const firstItem = normalizedItems[0];
+    const itemSummary =
+      normalizedItems.length === 1
+        ? `${firstItem.itemName} (${firstItem.dimensions})`
+        : `${firstItem.itemName} + ${normalizedItems.length - 1} more`;
+    const computedStatus = computeSalesBillStatusServer(normalizedItems);
+    const resolvedIso =
+      dateIso && /^\d{4}-\d{2}-\d{2}$/.test(dateIso.trim())
+        ? dateIso.trim()
+        : parseDateLabelToIsoServer(dateLabel);
+
+    const bill: SalesBill = {
+      id: `sb-${crypto.randomUUID().slice(0, 6)}`,
+      invoiceNo: formatInvoiceNoServer(invoiceNo),
+      customerName: customerName.trim(),
+      customerPhone: customerPhone?.trim() || '',
+      customerAddress: customerAddress?.trim() || '',
+      branchName: branchName.trim(),
+      itemSummary,
+      qty: totalQty,
+      unit: firstItem.unit,
+      totalInr,
+      status: computedStatus,
+      dateLabel: dateLabel?.trim() || 'Today',
+      dateIso: resolvedIso,
+      items: normalizedItems,
+    };
+
+    store.snapshot.salesBills = [bill, ...store.snapshot.salesBills];
+    const loc = store.snapshot.locations.find((l) => l.name === bill.branchName);
+
+    for (const line of normalizedItems) {
+      const item = store.snapshot.varianceItems.find((i) => i.itemCode === line.itemCode);
+      if (item) {
+        // Sales bill subtracts qty from System Stock AND updates/subtracts Physical Stock
+        item.systemQty = Math.max(0, item.systemQty - line.qty);
+        item.physicalQty = Math.max(0, item.physicalQty - line.qty);
+        recomputeItemMetrics(item);
+        item.lastCountedAt = 'Sales bill dispatched';
+
+        pushHistory({
+          itemId: item.id,
+          itemCode: item.itemCode,
+          type: 'Sale',
+          referenceNo: bill.invoiceNo,
+          quantityDelta: -line.qty,
+          unit: line.unit,
+          systemAfter: item.systemQty,
+          physicalAfter: item.physicalQty,
+          branchName: bill.branchName,
+          partyOrNote: `${bill.customerName} (${line.status} · Subtracted from System & Physical)`,
+          timestampLabel: 'Just now',
+        });
+      }
+      if (loc) {
+        if (line.unit === 'sq. ft') loc.sqftQty = Math.max(0, loc.sqftQty - line.qty);
+        if (line.unit === 'pcs') loc.pcsQty = Math.max(0, loc.pcsQty - line.qty);
+        if (line.unit === 'box') loc.boxQty = Math.max(0, loc.boxQty - line.qty);
+      }
     }
+
     store.snapshot.lastUpdatedAt = new Date().toISOString();
     saveStore();
     broadcastSnapshot();
     res.status(201).json({bill, snapshot: store.snapshot});
+  });
+
+  app.put('/api/inventory/sales-bills/:id', requireAuth, (req: Request, res: Response) => {
+    const billIndex = store.snapshot.salesBills.findIndex((b) => b.id === req.params.id);
+    if (billIndex === -1) {
+      res.status(404).json({error: 'Sales bill not found.'});
+      return;
+    }
+
+    const existing = store.snapshot.salesBills[billIndex];
+    const body = req.body as {
+      invoiceNo?: string;
+      customerName?: string;
+      customerPhone?: string;
+      customerAddress?: string;
+      branchName?: string;
+      dateLabel?: string;
+      dateIso?: string;
+      items?: Array<{
+        itemCode?: string;
+        qty?: number;
+        unit?: UnitType;
+        amountInr?: number;
+        status?: SalesPaymentStatus;
+      }>;
+    };
+
+    const {
+      invoiceNo,
+      customerName,
+      customerPhone,
+      customerAddress,
+      branchName,
+      dateLabel,
+      dateIso,
+      items,
+    } = body;
+
+    if (
+      !customerName?.trim() ||
+      !branchName?.trim() ||
+      !Array.isArray(items) ||
+      items.length === 0
+    ) {
+      res
+        .status(400)
+        .json({error: 'Customer name, branch, and at least one invoice item are required.'});
+      return;
+    }
+
+    const normalizedItems: SalesBillItem[] = [];
+    for (const raw of items) {
+      if (!raw.itemCode || !raw.qty || raw.qty <= 0 || !raw.unit) {
+        res.status(400).json({error: 'Every item requires a product, positive qty, and unit.'});
+        return;
+      }
+      const matched = store.snapshot.varianceItems.find((i) => i.itemCode === raw.itemCode);
+      const qtyRounded = Math.round(raw.qty);
+      const amountRounded = Math.max(
+        0,
+        Math.round(
+          raw.amountInr !== undefined && !Number.isNaN(Number(raw.amountInr))
+            ? Number(raw.amountInr)
+            : qtyRounded * (matched?.unitPriceInr || 500),
+        ),
+      );
+      normalizedItems.push({
+        id: `sbi-${crypto.randomUUID().slice(0, 6)}`,
+        itemCode: raw.itemCode,
+        itemName: matched ? matched.itemName : raw.itemCode,
+        dimensions: matched ? matched.dimensions : 'Standard',
+        qty: qtyRounded,
+        unit: raw.unit,
+        amountInr: amountRounded,
+        status: normalizeSalesItemStatusServer(raw.status),
+      });
+    }
+
+    // Reverse old stock deductions
+    const prevItems =
+      Array.isArray(existing.items) && existing.items.length > 0 ? existing.items : [];
+    const oldLoc = store.snapshot.locations.find((l) => l.name === existing.branchName);
+    for (const oldLine of prevItems) {
+      const oldItem = oldLine.itemCode
+        ? store.snapshot.varianceItems.find((i) => i.itemCode === oldLine.itemCode)
+        : store.snapshot.varianceItems.find(
+            (i) => i.itemName.toLowerCase() === oldLine.itemName.toLowerCase(),
+          );
+      if (oldItem) {
+        oldItem.systemQty += oldLine.qty;
+        oldItem.physicalQty += oldLine.qty;
+        recomputeItemMetrics(oldItem);
+      }
+      if (oldLoc) {
+        if (oldLine.unit === 'sq. ft') oldLoc.sqftQty += oldLine.qty;
+        if (oldLine.unit === 'pcs') oldLoc.pcsQty += oldLine.qty;
+        if (oldLine.unit === 'box') oldLoc.boxQty += oldLine.qty;
+      }
+    }
+
+    const totalInr = normalizedItems.reduce((sum, it) => sum + it.amountInr, 0);
+    const totalQty = normalizedItems.reduce((sum, it) => sum + it.qty, 0);
+    const firstItem = normalizedItems[0];
+    const itemSummary =
+      normalizedItems.length === 1
+        ? `${firstItem.itemName} (${firstItem.dimensions})`
+        : `${firstItem.itemName} + ${normalizedItems.length - 1} more`;
+    const computedStatus = computeSalesBillStatusServer(normalizedItems);
+    const resolvedIso =
+      dateIso && /^\d{4}-\d{2}-\d{2}$/.test(dateIso.trim())
+        ? dateIso.trim()
+        : parseDateLabelToIsoServer(dateLabel || existing.dateLabel);
+
+    const updatedBill: SalesBill = {
+      ...existing,
+      invoiceNo: formatInvoiceNoServer(invoiceNo?.trim() || existing.invoiceNo),
+      customerName: customerName.trim(),
+      customerPhone: customerPhone?.trim() ?? existing.customerPhone ?? '',
+      customerAddress: customerAddress?.trim() ?? existing.customerAddress ?? '',
+      branchName: branchName.trim(),
+      itemSummary,
+      qty: totalQty,
+      unit: firstItem.unit,
+      totalInr,
+      status: computedStatus,
+      dateLabel: dateLabel?.trim() || existing.dateLabel,
+      dateIso: resolvedIso,
+      items: normalizedItems,
+    };
+
+    store.snapshot.salesBills[billIndex] = updatedBill;
+
+    // Apply updated stock deductions
+    const newLoc = store.snapshot.locations.find((l) => l.name === updatedBill.branchName);
+    for (const line of normalizedItems) {
+      const item = store.snapshot.varianceItems.find((i) => i.itemCode === line.itemCode);
+      if (item) {
+        item.systemQty = Math.max(0, item.systemQty - line.qty);
+        item.physicalQty = Math.max(0, item.physicalQty - line.qty);
+        recomputeItemMetrics(item);
+        item.lastCountedAt = 'Sales bill updated';
+
+        pushHistory({
+          itemId: item.id,
+          itemCode: item.itemCode,
+          type: 'Sale',
+          referenceNo: updatedBill.invoiceNo,
+          quantityDelta: -line.qty,
+          unit: line.unit,
+          systemAfter: item.systemQty,
+          physicalAfter: item.physicalQty,
+          branchName: updatedBill.branchName,
+          partyOrNote: `${updatedBill.customerName} (Sales bill edited · ${line.status})`,
+          timestampLabel: 'Just now',
+        });
+      }
+      if (newLoc) {
+        if (line.unit === 'sq. ft') newLoc.sqftQty = Math.max(0, newLoc.sqftQty - line.qty);
+        if (line.unit === 'pcs') newLoc.pcsQty = Math.max(0, newLoc.pcsQty - line.qty);
+        if (line.unit === 'box') newLoc.boxQty = Math.max(0, newLoc.boxQty - line.qty);
+      }
+    }
+
+    store.snapshot.lastUpdatedAt = new Date().toISOString();
+    saveStore();
+    broadcastSnapshot();
+    res.json({bill: updatedBill, snapshot: store.snapshot});
   });
 
   app.post('/api/inventory/customers', requireAuth, (req: Request, res: Response) => {
@@ -1985,9 +3007,63 @@ async function startServer() {
       lastDeliveryLabel: 'New',
     };
     store.snapshot.suppliers = [supplier, ...store.snapshot.suppliers];
+    syncSuppliersFromPurchaseBills(store.snapshot);
+    store.snapshot.lastUpdatedAt = new Date().toISOString();
     saveStore();
     broadcastSnapshot();
     res.status(201).json({supplier, snapshot: store.snapshot});
+  });
+
+  app.put('/api/inventory/suppliers/:id', requireAuth, (req: Request, res: Response) => {
+    const supplier = store.snapshot.suppliers.find((s) => s.id === req.params.id);
+    if (!supplier) {
+      res.status(404).json({error: 'Supplier not found.'});
+      return;
+    }
+    const {name, origin, specialty, phone} = req.body as Partial<SupplierRecord>;
+    if (!name?.trim() || !origin?.trim()) {
+      res.status(400).json({error: 'Supplier name and origin are required.'});
+      return;
+    }
+
+    const oldName = supplier.name.trim().toLowerCase();
+    const newName = name.trim();
+    supplier.name = newName;
+    supplier.origin = origin.trim();
+    supplier.specialty = specialty?.trim() || supplier.specialty;
+    supplier.phone = phone?.trim() || '';
+
+    // Keep linked purchase bills in sync if supplier name changed
+    if (oldName !== newName.toLowerCase()) {
+      for (const bill of store.snapshot.purchaseBills) {
+        if (bill.supplierName.trim().toLowerCase() === oldName) {
+          bill.supplierName = newName;
+        }
+      }
+    }
+
+    syncSuppliersFromPurchaseBills(store.snapshot);
+    store.snapshot.lastUpdatedAt = new Date().toISOString();
+    saveStore();
+    broadcastSnapshot();
+    res.json({supplier, snapshot: store.snapshot});
+  });
+
+  app.delete('/api/inventory/suppliers/:id', requireAuth, (req: Request, res: Response) => {
+    const idx = store.snapshot.suppliers.findIndex((s) => s.id === req.params.id);
+    if (idx === -1) {
+      res.status(404).json({error: 'Supplier not found.'});
+      return;
+    }
+    const [removed] = store.snapshot.suppliers.splice(idx, 1);
+    store.snapshot.lastUpdatedAt = new Date().toISOString();
+    saveStore();
+    broadcastSnapshot();
+    res.json({
+      deletedId: removed.id,
+      name: removed.name,
+      snapshot: store.snapshot,
+    });
   });
 
   app.post('/api/inventory/transfers', requireAuth, (req: Request, res: Response) => {

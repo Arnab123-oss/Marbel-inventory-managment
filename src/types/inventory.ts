@@ -22,14 +22,20 @@ export type StoneCategory =
   | 'Onyx & Quartz';
 
 export type KpiId =
+  | 'totalSales'
+  | 'totalPurchases'
+  | 'totalStockValue'
+  | 'netProfit'
+  | 'lowStockItems'
   | 'totalBranches'
   | 'totalProducts'
-  | 'totalStockValue'
   | 'inventoryAccuracy'
-  | 'stockInTransit'
-  | 'lowStockItems';
+  | 'stockInTransit';
 
 export type WidgetId =
+  | 'salesTrend'
+  | 'topProducts'
+  | 'recentActivities'
   | 'accuracyOverview'
   | 'valueTrend'
   | 'stockValueByLocation'
@@ -61,7 +67,16 @@ export interface KpiMetrics {
   totalProducts: number;
   totalProductsDelta: number;
   totalStockValueCr: number;
+  totalStockValueInr?: number;
   totalStockValueDelta: number;
+  totalSalesInr?: number;
+  totalSalesCount?: number;
+  totalSalesCollectedPct?: number;
+  totalPurchasesInr?: number;
+  totalPurchasesCount?: number;
+  totalPurchasesPaidPct?: number;
+  netProfitInr?: number;
+  netProfitMarginPct?: number;
   inventoryAccuracyPct: number;
   inventoryAccuracyDelta: number;
   stockInTransitCr: number;
@@ -106,6 +121,7 @@ export interface LocationRow {
   pcsQty: number;
   boxQty: number;
   stockValueCr: number;
+  stockValueInr?: number;
   inventoryAccuracyPct: number;
   minorVarianceItems: number;
   majorVarianceItems: number;
@@ -163,8 +179,19 @@ export interface SlabLot {
   thicknessMm: number;
   branchName: string;
   finish: 'Polished' | 'Honed' | 'Leather';
-  status: 'Available' | 'Reserved' | 'Sold' | 'In Cutting';
+  status: 'In Stock' | 'Out of Stock';
   imageUrl?: string;
+  enabled?: boolean;
+}
+
+export interface PurchaseBillItem {
+  id: string;
+  itemCode: string;
+  itemName: string;
+  dimensions: string;
+  qty: number;
+  unit: UnitType;
+  amountInr: number;
 }
 
 export interface PurchaseBill {
@@ -178,19 +205,38 @@ export interface PurchaseBill {
   totalInr: number;
   status: 'Paid' | 'Pending' | 'Partial';
   dateLabel: string;
+  dateIso?: string;
+  items?: PurchaseBillItem[];
+}
+
+export type SalesPaymentStatus = 'Paid' | 'Partially Paid' | 'Due';
+
+export interface SalesBillItem {
+  id: string;
+  itemCode: string;
+  itemName: string;
+  dimensions: string;
+  qty: number;
+  unit: UnitType;
+  amountInr: number;
+  status: SalesPaymentStatus;
 }
 
 export interface SalesBill {
   id: string;
   invoiceNo: string;
   customerName: string;
+  customerPhone?: string;
+  customerAddress?: string;
   branchName: string;
   itemSummary: string;
   qty: number;
   unit: UnitType;
   totalInr: number;
-  status: 'Paid' | 'Due' | 'Dispatched';
+  status: SalesPaymentStatus;
   dateLabel: string;
+  dateIso?: string;
+  items?: SalesBillItem[];
 }
 
 export interface CustomerRecord {

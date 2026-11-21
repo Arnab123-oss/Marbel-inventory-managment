@@ -1,6 +1,7 @@
 import {ArrowUpDown, Search} from 'lucide-react';
 import {useMemo, useState} from 'react';
 import type {LocationRow} from '../../types/inventory';
+import {formatInrCompact, formatInrExact} from '../../utils/branchMetrics';
 
 interface LocationTableWidgetProps {
   locations: LocationRow[];
@@ -16,6 +17,12 @@ type SortField =
   | 'boxQty'
   | 'stockValueCr'
   | 'inventoryAccuracyPct';
+
+function getLocValueInr(loc: LocationRow): number {
+  return typeof loc.stockValueInr === 'number'
+    ? loc.stockValueInr
+    : Math.round(loc.stockValueCr * 10000000);
+}
 
 export function LocationTableWidget({
   locations,
@@ -33,6 +40,10 @@ export function LocationTableWidget({
       : locations;
 
     return [...list].sort((a, b) => {
+      if (sortField === 'stockValueCr') {
+        const diff = getLocValueInr(a) - getLocValueInr(b);
+        return sortAsc ? diff : -diff;
+      }
       const valA = a[sortField];
       const valB = b[sortField];
       if (typeof valA === 'string' && typeof valB === 'string') {
@@ -49,16 +60,28 @@ export function LocationTableWidget({
     const totalSqft = filtered.reduce((s, l) => s + l.sqftQty, 0);
     const totalPcs = filtered.reduce((s, l) => s + l.pcsQty, 0);
     const totalBox = filtered.reduce((s, l) => s + l.boxQty, 0);
-    const totalValue = filtered.reduce((s, l) => s + l.stockValueCr, 0);
+    const totalValueInr = filtered.reduce((s, l) => s + getLocValueInr(l), 0);
     const weightedAcc =
       totalItems > 0
         ? filtered.reduce((s, l) => s + l.inventoryAccuracyPct * l.totalItems, 0) /
           totalItems
-        : 0;
+        : filtered.length > 0
+          ? filtered.reduce((s, l) => s + l.inventoryAccuracyPct, 0) / filtered.length
+          : 100;
     const minor = filtered.reduce((s, l) => s + l.minorVarianceItems, 0);
     const major = filtered.reduce((s, l) => s + l.majorVarianceItems, 0);
     const low = filtered.reduce((s, l) => s + l.lowStockItems, 0);
-    return {totalItems, totalSqft, totalPcs, totalBox, totalValue, weightedAcc, minor, major, low};
+    return {
+      totalItems,
+      totalSqft,
+      totalPcs,
+      totalBox,
+      totalValueInr,
+      weightedAcc,
+      minor,
+      major,
+      low,
+    };
   }, [filtered]);
 
   function handleSort(field: SortField) {
@@ -95,7 +118,7 @@ export function LocationTableWidget({
       </div>
 
       <div className="overflow-x-auto -mx-1 px-1">
-        <table className="w-full border-collapse text-left min-w-[740px]">
+        <table className="w-full border-collapse text-left min-w-[760px]">
           <thead>
             <tr className="border-b border-[#E5E9F0] text-[11px] font-medium text-[#64748B]">
               <th className="py-2.5 pr-3">
@@ -177,6 +200,7 @@ export function LocationTableWidget({
             ) : (
               filtered.map((loc) => {
                 const isSelected = selectedLocationId === loc.id;
+                const valInr = getLocValueInr(loc);
                 return (
                   <tr
                     key={loc.id}
@@ -205,8 +229,11 @@ export function LocationTableWidget({
                     <td className="py-2.5 px-2 text-right text-[#0F172A] tabular-nums whitespace-nowrap">
                       {loc.boxQty.toLocaleString('en-IN')} box
                     </td>
-                    <td className="py-2.5 px-2 text-right text-[#0F172A] tabular-nums whitespace-nowrap">
-                      ₹ {loc.stockValueCr.toFixed(2)} Cr
+                    <td
+                      title={formatInrExact(valInr)}
+                      className="py-2.5 px-2 text-right text-[#0F172A] font-medium tabular-nums whitespace-nowrap"
+                    >
+                      {formatInrCompact(valInr)}
                     </td>
                     <td className="py-2.5 px-2 text-right text-[#0F172A] font-medium tabular-nums">
                       {loc.inventoryAccuracyPct.toFixed(2)}%
@@ -247,8 +274,11 @@ export function LocationTableWidget({
                 <td className="py-2.5 px-2 text-right tabular-nums whitespace-nowrap">
                   {totals.totalBox.toLocaleString('en-IN')} box
                 </td>
-                <td className="py-2.5 px-2 text-right tabular-nums whitespace-nowrap">
-                  ₹ {totals.totalValue.toFixed(2)} Cr
+                <td
+                  title={formatInrExact(totals.totalValueInr)}
+                  className="py-2.5 px-2 text-right tabular-nums whitespace-nowrap"
+                >
+                  {formatInrCompact(totals.totalValueInr)}
                 </td>
                 <td className="py-2.5 px-2 text-right tabular-nums">
                   {totals.weightedAcc.toFixed(2)}%
