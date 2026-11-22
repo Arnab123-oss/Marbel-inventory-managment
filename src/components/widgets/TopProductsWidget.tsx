@@ -1,10 +1,15 @@
 import {useMemo} from 'react';
-import type {SalesBill, VarianceItem} from '../../types/inventory';
-import {formatInrCompact, getSalesBillLines} from '../../utils/branchMetrics';
+import type {SalesBill, SlabLot, VarianceItem} from '../../types/inventory';
+import {
+  estimateSlabRateInr,
+  formatInrCompact,
+  getSalesBillLines,
+} from '../../utils/branchMetrics';
 
 interface TopProductsWidgetProps {
   salesBills: SalesBill[];
   varianceItems: VarianceItem[];
+  slabs?: SlabLot[];
   onViewProducts: () => void;
 }
 
@@ -19,10 +24,12 @@ const BAR_GRADIENTS = [
 export function TopProductsWidget({
   salesBills,
   varianceItems,
+  slabs = [],
   onViewProducts,
 }: TopProductsWidgetProps) {
   const {rows, isSalesBased} = useMemo(() => {
     const activeProducts = varianceItems.filter((p) => p.enabled !== false);
+    const activeSlabs = slabs.filter((s) => s.enabled !== false);
     const map = new Map<
       string,
       {itemCode: string; itemName: string; valueInr: number}
@@ -36,17 +43,29 @@ export function TopProductsWidget({
         totalSales += amt;
 
         const normCode = (line.itemCode || '').trim().toLowerCase();
-        const matched =
-          (normCode
-            ? activeProducts.find((p) => p.itemCode.trim().toLowerCase() === normCode)
-            : undefined) ||
-          activeProducts.find(
-            (p) =>
-              p.itemName.trim().toLowerCase() === line.itemName.trim().toLowerCase(),
-          );
+        const normName = (line.itemName || '').trim().toLowerCase();
 
-        const code = matched?.itemCode || line.itemCode || line.itemName.slice(0, 12);
-        const name = matched?.itemName || line.itemName;
+        const matchedSlab =
+          (normCode
+            ? activeSlabs.find((s) => s.lotNumber.trim().toLowerCase() === normCode)
+            : undefined) ||
+          activeSlabs.find((s) => s.stoneName.trim().toLowerCase() === normName);
+
+        const matchedProd = matchedSlab
+          ? undefined
+          : (normCode
+              ? activeProducts.find((p) => p.itemCode.trim().toLowerCase() === normCode)
+              : undefined) ||
+            activeProducts.find((p) => p.itemName.trim().toLowerCase() === normName);
+
+        const code =
+          matchedSlab?.lotNumber ||
+          matchedProd?.itemCode ||
+          line.itemCode ||
+          line.itemName.slice(0, 12);
+        const name = matchedSlab
+          ? `${matchedSlab.stoneName} · ${matchedSlab.thicknessMm}mm`
+          : matchedProd?.itemName || line.itemName;
         const key = code.toLowerCase();
         const prev = map.get(key) || {itemCode: code, itemName: name, valueInr: 0};
         prev.valueInr += amt;
@@ -66,16 +85,24 @@ export function TopProductsWidget({
     }
 
     // Fallback to stock value if no sales bills exist yet
-    const totalStock = activeProducts.reduce(
-      (sum, p) => sum + Math.max(0, p.physicalQty) * p.unitPriceInr,
-      0,
-    );
-    const fallback = [...activeProducts]
-      .map((p) => ({
+    const combinedStock = [
+      ...activeSlabs
+        .filter((s) => s.status === 'In Stock')
+        .map((s) => ({
+          itemCode: s.lotNumber,
+          itemName: `${s.stoneName} · ${s.thicknessMm}mm`,
+          valueInr: Math.round(
+            Math.max(0, s.totalSqFt) * estimateSlabRateInr(s, varianceItems),
+          ),
+        })),
+      ...activeProducts.map((p) => ({
         itemCode: p.itemCode,
         itemName: p.itemName,
         valueInr: Math.round(Math.max(0, p.physicalQty) * p.unitPriceInr),
-      }))
+      })),
+    ];
+    const totalStock = combinedStock.reduce((sum, item) => sum + item.valueInr, 0);
+    const fallback = combinedStock
       .sort((a, b) => b.valueInr - a.valueInr)
       .slice(0, 5)
       .map((r) => ({
@@ -83,7 +110,7 @@ export function TopProductsWidget({
         pct: totalStock > 0 ? Math.round((r.valueInr / totalStock) * 100) : 0,
       }));
     return {rows: fallback, isSalesBased: false};
-  }, [salesBills, varianceItems]);
+  }, [salesBills, varianceItems, slabs]);
 
   if (rows.length === 0) {
     return (

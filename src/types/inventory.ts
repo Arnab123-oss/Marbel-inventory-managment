@@ -175,8 +175,10 @@ export interface SlabLot {
   category: StoneCategory;
   dimensionsFt: string;
   slabCountPcs: number;
+  systemSqFt?: number;
   totalSqFt: number;
   thicknessMm: number;
+  unitPriceInr?: number;
   branchName: string;
   finish: 'Polished' | 'Honed' | 'Leather';
   status: 'In Stock' | 'Out of Stock';

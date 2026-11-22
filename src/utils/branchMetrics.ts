@@ -120,6 +120,9 @@ export function estimateSlabRateInr(
   slab: SlabLot,
   allProducts: VarianceItem[],
 ): number {
+  if (slab.unitPriceInr && slab.unitPriceInr > 0) {
+    return Math.round(slab.unitPriceInr);
+  }
   const matchingSqftProducts = allProducts.filter(
     (p) => p.enabled !== false && p.category === slab.category && p.unit === 'sq. ft' && p.unitPriceInr > 0,
   );
@@ -191,10 +194,10 @@ export function computeBranchBreakdown(
   const skuSet = new Set<string>();
 
   for (const p of products) {
-    skuSet.add(`prod:${p.itemCode.toUpperCase()}`);
+    skuSet.add(p.itemCode.trim().toUpperCase());
   }
   for (const s of inStockSlabs) {
-    skuSet.add(`slab:${s.lotNumber.toUpperCase()}`);
+    skuSet.add(s.lotNumber.trim().toUpperCase());
   }
 
   for (const bill of purchaseBills) {
@@ -206,7 +209,7 @@ export function computeBranchBreakdown(
       else if (line.unit === 'box') purchaseBox += qty;
       purchaseValueInr += Math.max(0, Number(line.amountInr) || 0);
       if (line.itemCode) {
-        skuSet.add(`prod:${line.itemCode.toUpperCase()}`);
+        skuSet.add(line.itemCode.trim().toUpperCase());
       }
     }
   }
@@ -225,7 +228,7 @@ export function computeBranchBreakdown(
       else if (line.unit === 'box') salesBox += qty;
       salesValueInr += Math.max(0, Number(line.amountInr) || 0);
       if (line.itemCode) {
-        skuSet.add(`prod:${line.itemCode.toUpperCase()}`);
+        skuSet.add(line.itemCode.trim().toUpperCase());
       }
     }
   }

@@ -45,7 +45,7 @@ import {
 import {RowActionMenu} from '../ui/RowActionMenu';
 import {LocationTableWidget} from '../widgets/LocationTableWidget';
 import {ReportsAnalyticsView} from './ReportsAnalyticsView';
-import {computeAllBranches, formatInrCompact} from '../../utils/branchMetrics';
+import {computeAllBranches, estimateSlabRateInr, formatInrCompact} from '../../utils/branchMetrics';
 
 interface SecondaryViewsProps {
   section: Exclude<NavSection, 'dashboard'>;
@@ -452,17 +452,88 @@ export function SecondaryViews({
   const [actionTarget, setActionTarget] = useState<ActionModalTarget | null>(null);
   const [actionMode, setActionMode] = useState<ActionModalMode>('view');
 
+  // Unified billable catalog: Slabs (from Slabs section by Slab ID) + Products (non-slab SKUs)
+  const billableOptions = useMemo(() => {
+    const slabOpts = snapshot.slabs
+      .filter((s) => s.enabled !== false)
+      .map((s) => ({
+        id: s.id,
+        group: 'slab' as const,
+        itemCode: s.lotNumber,
+        itemName: `${s.stoneName} · ${s.thicknessMm}mm`,
+        dimensions: s.dimensionsFt,
+        unit: 'sq. ft' as UnitType,
+        unitPriceInr: estimateSlabRateInr(s, snapshot.varianceItems),
+      }));
+
+    const prodOpts = snapshot.varianceItems
+      .filter((i) => i.enabled !== false)
+      .map((i) => ({
+        id: i.id,
+        group: 'product' as const,
+        itemCode: i.itemCode,
+        itemName: i.itemName,
+        dimensions: i.dimensions,
+        unit: i.unit,
+        unitPriceInr: i.unitPriceInr,
+      }));
+
+    return [...slabOpts, ...prodOpts];
+  }, [snapshot.slabs, snapshot.varianceItems]);
+
+  const slabBillableOptions = useMemo(
+    () => billableOptions.filter((o) => o.group === 'slab'),
+    [billableOptions],
+  );
+
+  const productBillableOptions = useMemo(
+    () => billableOptions.filter((o) => o.group === 'product'),
+    [billableOptions],
+  );
+
+  const findBillableByCode = (code: string) => {
+    const norm = (code || '').trim().toLowerCase();
+    if (!norm) return undefined;
+    const activeMatch = billableOptions.find((o) => o.itemCode.trim().toLowerCase() === norm);
+    if (activeMatch) return activeMatch;
+    const anySlab = snapshot.slabs.find((s) => s.lotNumber.trim().toLowerCase() === norm);
+    if (anySlab) {
+      return {
+        id: anySlab.id,
+        group: 'slab' as const,
+        itemCode: anySlab.lotNumber,
+        itemName: `${anySlab.stoneName} · ${anySlab.thicknessMm}mm`,
+        dimensions: anySlab.dimensionsFt,
+        unit: 'sq. ft' as UnitType,
+        unitPriceInr: estimateSlabRateInr(anySlab, snapshot.varianceItems),
+      };
+    }
+    const anyProd = snapshot.varianceItems.find((i) => i.itemCode.trim().toLowerCase() === norm);
+    if (anyProd) {
+      return {
+        id: anyProd.id,
+        group: 'product' as const,
+        itemCode: anyProd.itemCode,
+        itemName: anyProd.itemName,
+        dimensions: anyProd.dimensions,
+        unit: anyProd.unit,
+        unitPriceInr: anyProd.unitPriceInr,
+      };
+    }
+    return undefined;
+  };
+
   // Product creation state
-  const [prodCode, setProdCode] = useState('MRB-SLB-8X5');
-  const [prodName, setProdName] = useState('Italian Statuario Slab');
-  const [prodDimensions, setProdDimensions] = useState('8 ft × 5 ft');
-  const [prodCat, setProdCat] = useState<StoneCategory>('Marble');
+  const [prodCode, setProdCode] = useState('TIL-BOX-4X2');
+  const [prodName, setProdName] = useState('Italian Glossy Wall Tile');
+  const [prodDimensions, setProdDimensions] = useState('4 ft × 2 ft');
+  const [prodCat, setProdCat] = useState<StoneCategory>('Tiles');
   const [prodFinish, setProdFinish] = useState<VarianceItem['finish']>('Polished');
-  const [prodThick, setProdThick] = useState('18 mm');
+  const [prodThick, setProdThick] = useState('10 mm');
   const [prodBranch, setProdBranch] = useState(snapshot.locations[0]?.id || 'main-showroom');
-  const [prodUnit, setProdUnit] = useState<UnitType>('sq. ft');
-  const [prodQty, setProdQty] = useState('1600');
-  const [prodPrice, setProdPrice] = useState('680');
+  const [prodUnit, setProdUnit] = useState<UnitType>('box');
+  const [prodQty, setProdQty] = useState('120');
+  const [prodPrice, setProdPrice] = useState('1450');
   const [prodImageUrl, setProdImageUrl] = useState('');
   const [prodImageLoading, setProdImageLoading] = useState(false);
   const [prodError, setProdError] = useState<string | null>(null);
@@ -494,14 +565,13 @@ export function SecondaryViews({
   // Purchase bill state
   const createDefaultPbItem = (index = 0): PurchaseBillDraftItem => {
     const pick =
-      snapshot.varianceItems[index % Math.max(1, snapshot.varianceItems.length)] ||
-      snapshot.varianceItems[0];
+      billableOptions[index % Math.max(1, billableOptions.length)] || billableOptions[0];
     const defaultQty = 100;
     const defaultUnit: UnitType = pick?.unit || 'sq. ft';
     const defaultAmount = defaultQty * (pick?.unitPriceInr || 450);
     return {
       id: `draft-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      itemCode: pick?.itemCode || 'MRB-SLB-10X5',
+      itemCode: pick?.itemCode || 'SL-001',
       qty: String(defaultQty),
       unit: defaultUnit,
       amountInr: String(defaultAmount),
@@ -549,15 +619,14 @@ export function SecondaryViews({
 
     const draftItems: PurchaseBillDraftItem[] = sourceItems.map((it, idx) => {
       const matched =
-        (it.itemCode &&
-          snapshot.varianceItems.find((v) => v.itemCode === it.itemCode)) ||
-        snapshot.varianceItems.find(
+        (it.itemCode && findBillableByCode(it.itemCode)) ||
+        billableOptions.find(
           (v) => v.itemName.toLowerCase() === it.itemName.toLowerCase(),
         ) ||
-        snapshot.varianceItems[0];
+        billableOptions[0];
       return {
         id: it.id || `edit-${Date.now()}-${idx}`,
-        itemCode: matched?.itemCode || it.itemCode || 'MRB-SLB-10X5',
+        itemCode: matched?.itemCode || it.itemCode || 'SL-001',
         qty: String(it.qty),
         unit: it.unit,
         amountInr: String(it.amountInr),
@@ -577,14 +646,13 @@ export function SecondaryViews({
   // Sales bill state
   const createDefaultSbItem = (index = 0): SalesBillDraftItem => {
     const pick =
-      snapshot.varianceItems[index % Math.max(1, snapshot.varianceItems.length)] ||
-      snapshot.varianceItems[0];
+      billableOptions[index % Math.max(1, billableOptions.length)] || billableOptions[0];
     const defaultQty = 100;
     const defaultUnit: UnitType = pick?.unit || 'sq. ft';
     const defaultAmount = defaultQty * (pick?.unitPriceInr || 680);
     return {
       id: `sb-draft-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      itemCode: pick?.itemCode || 'MRB-SLB-10X5',
+      itemCode: pick?.itemCode || 'SL-001',
       qty: String(defaultQty),
       unit: defaultUnit,
       amountInr: String(defaultAmount),
@@ -634,15 +702,14 @@ export function SecondaryViews({
 
     const draftItems: SalesBillDraftItem[] = sourceItems.map((it, idx) => {
       const matched =
-        (it.itemCode &&
-          snapshot.varianceItems.find((v) => v.itemCode === it.itemCode)) ||
-        snapshot.varianceItems.find(
+        (it.itemCode && findBillableByCode(it.itemCode)) ||
+        billableOptions.find(
           (v) => v.itemName.toLowerCase() === it.itemName.toLowerCase(),
         ) ||
-        snapshot.varianceItems[0];
+        billableOptions[0];
       return {
         id: it.id || `sb-edit-${Date.now()}-${idx}`,
-        itemCode: matched?.itemCode || it.itemCode || 'MRB-SLB-10X5',
+        itemCode: matched?.itemCode || it.itemCode || 'SL-001',
         qty: String(it.qty),
         unit: it.unit,
         amountInr: String(it.amountInr),
@@ -663,7 +730,7 @@ export function SecondaryViews({
 
   // Transfer state
   const [transferItem, setTransferItem] = useState(
-    snapshot.varianceItems[0]?.itemCode || 'MRB-SLB-10X5',
+    billableOptions[0]?.itemCode || 'SL-001',
   );
   const [transferFrom, setTransferFrom] = useState(
     snapshot.locations[5]?.name || 'Kishangarh Hub',
@@ -1020,17 +1087,21 @@ export function SecondaryViews({
                 </div>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse min-w-[880px]">
+                  <table className="w-full text-left border-collapse min-w-[1280px]">
                     <thead>
                       <tr className="border-b border-[#E5E9F0] text-[11.5px] font-medium text-[#64748B]">
                         <th className="py-2.5 pr-3">Image</th>
-                        <th className="py-2.5 px-3">Slab ID</th>
+                        <th className="py-2.5 px-3">Code</th>
                         <th className="py-2.5 px-3">Product</th>
+                        <th className="py-2.5 px-3">Branch</th>
+                        <th className="py-2.5 px-3 text-right">Area (sq. ft)</th>
                         <th className="py-2.5 px-3">Category</th>
                         <th className="py-2.5 px-3">Dimensions</th>
                         <th className="py-2.5 px-3">Thickness</th>
-                        <th className="py-2.5 px-3">Branch</th>
-                        <th className="py-2.5 px-3 text-right">Area (sq. ft)</th>
+                        <th className="py-2.5 px-3">Unit</th>
+                        <th className="py-2.5 px-3 text-right">System Stock</th>
+                        <th className="py-2.5 px-3 text-right">Physical Stock</th>
+                        <th className="py-2.5 px-3 text-right">Variance</th>
                         <th className="py-2.5 px-3 text-right">Status</th>
                         <th className="py-2.5 pl-3 text-right">Actions</th>
                       </tr>
@@ -1038,6 +1109,17 @@ export function SecondaryViews({
                     <tbody className="divide-y divide-[#F1F5F9] text-[12.5px]">
                       {filteredSlabs.map((slab) => {
                         const isDisabled = slab.enabled === false;
+                        const perSlabArea =
+                          calculateAreaSqFtFromDimensions(slab.dimensionsFt) ?? slab.totalSqFt;
+                        const physicalQty =
+                          slab.status === 'Out of Stock' ? 0 : Math.max(0, slab.totalSqFt);
+                        const systemQty =
+                          typeof slab.systemSqFt === 'number'
+                            ? Math.max(0, slab.systemSqFt)
+                            : physicalQty;
+                        const variance = Number((physicalQty - systemQty).toFixed(2));
+                        const isNeg = variance < 0;
+                        const isPos = variance > 0;
                         return (
                           <tr
                             key={slab.id}
@@ -1059,16 +1141,19 @@ export function SecondaryViews({
                             <td className="py-3 px-3 font-mono font-semibold text-[#0F172A] whitespace-nowrap">
                               {slab.lotNumber}
                             </td>
-                            <td className="py-3 px-3 font-medium text-[#1E293B]">
-                              <div>
-                                {slab.stoneName} ·{' '}
-                                <span className="text-[#64748B]">{slab.thicknessMm}mm</span>
-                              </div>
+                            <td className="py-3 px-3 font-medium text-[#1E293B] whitespace-nowrap">
+                              <div>{slab.stoneName}</div>
                               {isDisabled && (
                                 <div className="text-[10.5px] font-medium text-[#94A3B8]">
                                   Disabled
                                 </div>
                               )}
+                            </td>
+                            <td className="py-3 px-3 text-[#475569] whitespace-nowrap">
+                              {slab.branchName}
+                            </td>
+                            <td className="py-3 px-3 text-right font-semibold tabular-nums text-[#0F172A] whitespace-nowrap">
+                              {perSlabArea.toLocaleString('en-IN')} sq. ft
                             </td>
                             <td className="py-3 px-3 font-medium text-[#334155] whitespace-nowrap">
                               {slab.category}
@@ -1079,11 +1164,28 @@ export function SecondaryViews({
                             <td className="py-3 px-3 font-mono text-[12px] text-[#475569] whitespace-nowrap">
                               {slab.thicknessMm} mm
                             </td>
-                            <td className="py-3 px-3 text-[#475569] whitespace-nowrap">
-                              {slab.branchName}
+                            <td className="py-3 px-3 font-medium text-[#2563EB] whitespace-nowrap">
+                              sq. ft
                             </td>
-                            <td className="py-3 px-3 text-right font-semibold tabular-nums whitespace-nowrap">
-                              {slab.totalSqFt.toLocaleString('en-IN')} sq. ft
+                            <td className="py-3 px-3 text-right tabular-nums whitespace-nowrap">
+                              {systemQty.toLocaleString('en-IN')}
+                            </td>
+                            <td className="py-3 px-3 text-right tabular-nums whitespace-nowrap">
+                              {physicalQty.toLocaleString('en-IN')}
+                            </td>
+                            <td
+                              className={`py-3 px-3 text-right font-semibold tabular-nums whitespace-nowrap ${
+                                isNeg
+                                  ? 'text-[#DC2626]'
+                                  : isPos
+                                    ? 'text-[#16A34A]'
+                                    : 'text-[#64748B]'
+                              }`}
+                            >
+                              {isPos
+                                ? `+${variance.toLocaleString('en-IN')}`
+                                : variance.toLocaleString('en-IN')}{' '}
+                              sq. ft
                             </td>
                             <td
                               className={`py-3 px-3 text-right font-semibold whitespace-nowrap ${
@@ -1795,13 +1897,15 @@ export function SecondaryViews({
                 Slab Inventory Records ({snapshot.slabs.length})
               </h2>
               <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse min-w-[780px]">
+                <table className="w-full text-left border-collapse min-w-[880px]">
                   <thead>
                     <tr className="border-b border-[#E5E9F0] text-[11px] font-medium text-[#64748B]">
-                      <th className="py-2 pr-2">Slab ID</th>
+                      <th className="py-2 pr-2">Image</th>
+                      <th className="py-2 px-2">Slab ID</th>
                       <th className="py-2 px-2">Product</th>
                       <th className="py-2 px-2">Category</th>
                       <th className="py-2 px-2">Dimensions</th>
+                      <th className="py-2 px-2">Thickness</th>
                       <th className="py-2 px-2">Branch</th>
                       <th className="py-2 px-2 text-right">Area (sq. ft)</th>
                       <th className="py-2 px-2 text-right">Status</th>
@@ -1819,8 +1923,21 @@ export function SecondaryViews({
                             isEnabled ? 'hover:bg-slate-50/80' : 'bg-slate-50/60'
                           }`}
                         >
+                          <td className="py-2 pr-2 whitespace-nowrap">
+                            <img
+                              src={resolveProductImage(slab.imageUrl)}
+                              alt={slab.stoneName}
+                              referrerPolicy="no-referrer"
+                              onError={(e) => {
+                                e.currentTarget.src = DEFAULT_PRODUCT_IMAGE;
+                              }}
+                              className={`w-9 h-9 rounded-lg object-cover border border-[#E5E9F0] bg-slate-50 ${
+                                !isEnabled ? 'opacity-50' : ''
+                              }`}
+                            />
+                          </td>
                           <td
-                            className={`py-2.5 pr-2 font-mono font-semibold whitespace-nowrap ${
+                            className={`py-2.5 px-2 font-mono font-semibold whitespace-nowrap ${
                               !isEnabled ? 'text-[#94A3B8]' : 'text-[#0F172A]'
                             }`}
                           >
@@ -1849,6 +1966,13 @@ export function SecondaryViews({
                             }`}
                           >
                             {slab.dimensionsFt}
+                          </td>
+                          <td
+                            className={`py-2.5 px-2 font-mono tabular-nums whitespace-nowrap ${
+                              !isEnabled ? 'text-[#94A3B8]' : 'text-[#475569]'
+                            }`}
+                          >
+                            {slab.thicknessMm} mm
                           </td>
                           <td
                             className={`py-2.5 px-2 whitespace-nowrap ${
@@ -2148,9 +2272,7 @@ export function SecondaryViews({
                       value={row.itemCode}
                       onChange={(e) => {
                         const nextCode = e.target.value;
-                        const found = snapshot.varianceItems.find(
-                          (i) => i.itemCode === nextCode,
-                        );
+                        const found = findBillableByCode(nextCode);
                         updatePbItem(row.id, (prev) => {
                           const qtyNum = Number(prev.qty) || 0;
                           return {
@@ -2165,11 +2287,24 @@ export function SecondaryViews({
                       }}
                       className="w-full h-9 px-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white"
                     >
-                      {snapshot.varianceItems.map((i) => (
-                        <option key={i.id} value={i.itemCode}>
-                          {i.itemCode} — {i.itemName} ({i.dimensions}) · {i.unit}
-                        </option>
-                      ))}
+                      {slabBillableOptions.length > 0 && (
+                        <optgroup label="Slabs (Slab SKU)">
+                          {slabBillableOptions.map((o) => (
+                            <option key={o.id} value={o.itemCode}>
+                              {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {productBillableOptions.length > 0 && (
+                        <optgroup label="Products (Product SKU)">
+                          {productBillableOptions.map((o) => (
+                            <option key={o.id} value={o.itemCode}>
+                              {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
                     </select>
                   </div>
 
@@ -2184,9 +2319,7 @@ export function SecondaryViews({
                         value={row.qty}
                         onChange={(e) => {
                           const nextQty = e.target.value;
-                          const found = snapshot.varianceItems.find(
-                            (i) => i.itemCode === row.itemCode,
-                          );
+                          const found = findBillableByCode(row.itemCode);
                           updatePbItem(row.id, (prev) => ({
                             ...prev,
                             qty: nextQty,
@@ -2587,9 +2720,7 @@ export function SecondaryViews({
                       value={row.itemCode}
                       onChange={(e) => {
                         const nextCode = e.target.value;
-                        const found = snapshot.varianceItems.find(
-                          (i) => i.itemCode === nextCode,
-                        );
+                        const found = findBillableByCode(nextCode);
                         updateSbItem(row.id, (prev) => {
                           const qtyNum = Number(prev.qty) || 0;
                           return {
@@ -2604,11 +2735,24 @@ export function SecondaryViews({
                       }}
                       className="w-full h-9 px-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white"
                     >
-                      {snapshot.varianceItems.map((i) => (
-                        <option key={i.id} value={i.itemCode}>
-                          {i.itemCode} — {i.itemName} ({i.dimensions}) · {i.unit}
-                        </option>
-                      ))}
+                      {slabBillableOptions.length > 0 && (
+                        <optgroup label="Slabs (Slab SKU)">
+                          {slabBillableOptions.map((o) => (
+                            <option key={o.id} value={o.itemCode}>
+                              {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {productBillableOptions.length > 0 && (
+                        <optgroup label="Products (Product SKU)">
+                          {productBillableOptions.map((o) => (
+                            <option key={o.id} value={o.itemCode}>
+                              {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
                     </select>
                   </div>
 
@@ -2623,9 +2767,7 @@ export function SecondaryViews({
                         value={row.qty}
                         onChange={(e) => {
                           const nextQty = e.target.value;
-                          const found = snapshot.varianceItems.find(
-                            (i) => i.itemCode === row.itemCode,
-                          );
+                          const found = findBillableByCode(row.itemCode);
                           updateSbItem(row.id, (prev) => ({
                             ...prev,
                             qty: nextQty,
@@ -2839,7 +2981,7 @@ export function SecondaryViews({
   }
 
   if (section === 'transfers') {
-    const selectedSku = snapshot.varianceItems.find((i) => i.itemCode === transferItem);
+    const selectedSku = findBillableByCode(transferItem);
     return (
       <div className="space-y-5">
         <div>
@@ -2876,11 +3018,24 @@ export function SecondaryViews({
                 onChange={(e) => setTransferItem(e.target.value)}
                 className="w-full h-9 px-3 text-[12.5px] rounded-lg border border-[#E2E8F0] bg-white"
               >
-                {snapshot.varianceItems.map((i) => (
-                  <option key={i.id} value={i.itemCode}>
-                    {i.itemCode} — {i.itemName} ({i.dimensions}) · {i.unit}
-                  </option>
-                ))}
+                {slabBillableOptions.length > 0 && (
+                  <optgroup label="Slabs (Slab SKU)">
+                    {slabBillableOptions.map((o) => (
+                      <option key={o.id} value={o.itemCode}>
+                        {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {productBillableOptions.length > 0 && (
+                  <optgroup label="Products (Product SKU)">
+                    {productBillableOptions.map((o) => (
+                      <option key={o.id} value={o.itemCode}>
+                        {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -3940,9 +4095,7 @@ export function SecondaryViews({
                                 value={row.itemCode}
                                 onChange={(e) => {
                                   const nextCode = e.target.value;
-                                  const found = snapshot.varianceItems.find(
-                                    (i) => i.itemCode === nextCode,
-                                  );
+                                  const found = findBillableByCode(nextCode);
                                   updateEditPbItem(row.id, (prev) => {
                                     const qtyNum = Number(prev.qty) || 0;
                                     return {
@@ -3957,11 +4110,24 @@ export function SecondaryViews({
                                 }}
                                 className="w-full h-9 px-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white"
                               >
-                                {snapshot.varianceItems.map((i) => (
-                                  <option key={i.id} value={i.itemCode}>
-                                    {i.itemCode} — {i.itemName} ({i.dimensions}) · {i.unit}
-                                  </option>
-                                ))}
+                                {slabBillableOptions.length > 0 && (
+                                  <optgroup label="Slabs (Slab SKU)">
+                                    {slabBillableOptions.map((o) => (
+                                      <option key={o.id} value={o.itemCode}>
+                                        {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
+                                {productBillableOptions.length > 0 && (
+                                  <optgroup label="Products (Product SKU)">
+                                    {productBillableOptions.map((o) => (
+                                      <option key={o.id} value={o.itemCode}>
+                                        {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
                               </select>
                             </div>
 
@@ -3976,9 +4142,7 @@ export function SecondaryViews({
                                   value={row.qty}
                                   onChange={(e) => {
                                     const nextQty = e.target.value;
-                                    const found = snapshot.varianceItems.find(
-                                      (i) => i.itemCode === row.itemCode,
-                                    );
+                                    const found = findBillableByCode(row.itemCode);
                                     updateEditPbItem(row.id, (prev) => ({
                                       ...prev,
                                       qty: nextQty,
@@ -4491,9 +4655,7 @@ export function SecondaryViews({
                                 value={row.itemCode}
                                 onChange={(e) => {
                                   const nextCode = e.target.value;
-                                  const found = snapshot.varianceItems.find(
-                                    (i) => i.itemCode === nextCode,
-                                  );
+                                  const found = findBillableByCode(nextCode);
                                   updateEditSbItem(row.id, (prev) => {
                                     const qtyNum = Number(prev.qty) || 0;
                                     return {
@@ -4508,11 +4670,24 @@ export function SecondaryViews({
                                 }}
                                 className="w-full h-9 px-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white"
                               >
-                                {snapshot.varianceItems.map((i) => (
-                                  <option key={i.id} value={i.itemCode}>
-                                    {i.itemCode} — {i.itemName} ({i.dimensions}) · {i.unit}
-                                  </option>
-                                ))}
+                                {slabBillableOptions.length > 0 && (
+                                  <optgroup label="Slabs (Slab SKU)">
+                                    {slabBillableOptions.map((o) => (
+                                      <option key={o.id} value={o.itemCode}>
+                                        {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
+                                {productBillableOptions.length > 0 && (
+                                  <optgroup label="Products (Product SKU)">
+                                    {productBillableOptions.map((o) => (
+                                      <option key={o.id} value={o.itemCode}>
+                                        {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                                      </option>
+                                    ))}
+                                  </optgroup>
+                                )}
                               </select>
                             </div>
 
@@ -4527,9 +4702,7 @@ export function SecondaryViews({
                                   value={row.qty}
                                   onChange={(e) => {
                                     const nextQty = e.target.value;
-                                    const found = snapshot.varianceItems.find(
-                                      (i) => i.itemCode === row.itemCode,
-                                    );
+                                    const found = findBillableByCode(row.itemCode);
                                     updateEditSbItem(row.id, (prev) => ({
                                       ...prev,
                                       qty: nextQty,

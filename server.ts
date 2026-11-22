@@ -25,7 +25,7 @@ import type {
   VarianceItem,
   WidgetId,
 } from './src/types/inventory.ts';
-import {computeAllBranches} from './src/utils/branchMetrics.ts';
+import {computeAllBranches, estimateSlabRateInr} from './src/utils/branchMetrics.ts';
 
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -179,6 +179,154 @@ function syncLocationsFromLedger(snap: InventorySnapshot): boolean {
     changed = true;
   }
   snap.kpis.totalBranches = snap.locations.length;
+
+  return changed;
+}
+
+const LEGACY_SLAB_SKU_MAP: Record<string, string> = {
+  'MRB-SLB-10X5': 'SL-001',
+  'MRB-SLB-9X5': 'SL-004',
+  'GRN-SLB-10X6': 'SL-003',
+  'ONX-SLB-8X5': 'SL-005',
+  'MRB-SLB-9X5B': 'SL-007',
+};
+
+function migrateUnifiedSlabs(snap: InventorySnapshot): boolean {
+  let changed = false;
+  const skuRemap = new Map<string, string>();
+  const remainingVariance: VarianceItem[] = [];
+
+  const nextSlabNumber = () => {
+    let maxNum = 0;
+    for (const s of snap.slabs) {
+      const m = s.lotNumber.match(/(\d+)$/);
+      if (m) maxNum = Math.max(maxNum, Number(m[1]));
+    }
+    return `SL-${String(maxNum + 1).padStart(3, '0')}`;
+  };
+
+  for (const item of snap.varianceItems) {
+    const upperCode = item.itemCode.trim().toUpperCase();
+    const mappedLot = LEGACY_SLAB_SKU_MAP[upperCode];
+    const isSlabProduct = Boolean(mappedLot) || item.unit === 'sq. ft';
+
+    if (!isSlabProduct) {
+      remainingVariance.push(item);
+      continue;
+    }
+
+    changed = true;
+    let targetSlab =
+      (mappedLot
+        ? snap.slabs.find((s) => s.lotNumber.trim().toUpperCase() === mappedLot)
+        : undefined) ||
+      snap.slabs.find(
+        (s) =>
+          s.stoneName.trim().toLowerCase() === item.itemName.trim().toLowerCase() &&
+          s.branchName.trim().toLowerCase() === item.locationName.trim().toLowerCase(),
+      );
+
+    if (targetSlab) {
+      if (item.physicalQty > targetSlab.totalSqFt) {
+        targetSlab.totalSqFt = item.physicalQty;
+      }
+      if (typeof targetSlab.systemSqFt !== 'number' || item.systemQty > targetSlab.systemSqFt) {
+        targetSlab.systemSqFt = item.systemQty;
+      }
+      if (!targetSlab.unitPriceInr && item.unitPriceInr > 0) {
+        targetSlab.unitPriceInr = item.unitPriceInr;
+      }
+      if (!targetSlab.imageUrl && item.imageUrl) {
+        targetSlab.imageUrl = item.imageUrl;
+      }
+      skuRemap.set(upperCode, targetSlab.lotNumber);
+    } else {
+      const lotNumber = mappedLot || nextSlabNumber();
+      const parsedThick = Number.parseInt(item.thickness, 10);
+      const thicknessMm = Number.isFinite(parsedThick) && parsedThick > 0 ? parsedThick : 18;
+      const newSlab: SlabLot = {
+        id: `slab-migrated-${lotNumber.toLowerCase()}`,
+        lotNumber,
+        stoneName: item.itemName,
+        category: item.category,
+        dimensionsFt: item.dimensions.replace(/\s*ft\s*/gi, ' ').replace(/\s+/g, ' ').trim() + ' ft',
+        slabCountPcs: Math.max(1, Math.round(item.physicalQty / 50)),
+        systemSqFt: Math.max(0, item.systemQty),
+        totalSqFt: Math.max(0, item.physicalQty),
+        thicknessMm,
+        branchName: item.locationName,
+        finish:
+          item.finish === 'Honed' || item.finish === 'Leather' ? item.finish : 'Polished',
+        status: item.physicalQty > 0 ? 'In Stock' : 'Out of Stock',
+        enabled: item.enabled !== false,
+        unitPriceInr: item.unitPriceInr > 0 ? item.unitPriceInr : 550,
+        imageUrl: item.imageUrl,
+      };
+      snap.slabs.push(newSlab);
+      skuRemap.set(upperCode, lotNumber);
+    }
+  }
+
+  for (const s of snap.slabs) {
+    if (typeof s.systemSqFt !== 'number') {
+      s.systemSqFt = s.status === 'Out of Stock' ? 0 : s.totalSqFt;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    snap.varianceItems = remainingVariance;
+  }
+
+  const remapCode = (code?: string): string | undefined => {
+    if (!code) return code;
+    const upper = code.trim().toUpperCase();
+    return skuRemap.get(upper) || LEGACY_SLAB_SKU_MAP[upper] || code;
+  };
+
+  for (const bill of snap.purchaseBills) {
+    if (Array.isArray(bill.items)) {
+      for (const line of bill.items) {
+        const nextCode = remapCode(line.itemCode);
+        if (nextCode && nextCode !== line.itemCode) {
+          line.itemCode = nextCode;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  for (const bill of snap.salesBills) {
+    if (Array.isArray(bill.items)) {
+      for (const line of bill.items) {
+        const nextCode = remapCode(line.itemCode);
+        if (nextCode && nextCode !== line.itemCode) {
+          line.itemCode = nextCode;
+          changed = true;
+        }
+      }
+    }
+  }
+
+  for (const h of snap.history) {
+    const nextCode = remapCode(h.itemCode);
+    if (nextCode && nextCode !== h.itemCode) {
+      h.itemCode = nextCode;
+      changed = true;
+    }
+  }
+
+  for (const t of snap.transfers) {
+    const nextCode = remapCode(t.itemCode);
+    if (nextCode && nextCode !== t.itemCode) {
+      t.itemCode = nextCode;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    syncLocationsFromLedger(snap);
+  }
 
   return changed;
 }
@@ -465,63 +613,6 @@ function buildInitialSnapshot(): InventorySnapshot {
 
   const varianceItems: VarianceItem[] = [
     {
-      id: 'var-1',
-      itemCode: 'MRB-SLB-10X5',
-      itemName: 'Italian Statuario Slab',
-      dimensions: '10 ft × 5 ft',
-      category: 'Marble',
-      finish: 'Polished',
-      thickness: '18 mm',
-      locationId: 'main-showroom',
-      locationName: 'Main Showroom',
-      unit: 'sq. ft',
-      systemQty: 7500,
-      physicalQty: 7250,
-      variance: -250,
-      variancePct: -3.33,
-      unitPriceInr: 740,
-      status: 'Low Stock',
-      lastCountedAt: '10 min ago',
-    },
-    {
-      id: 'var-1b',
-      itemCode: 'MRB-SLB-9X5',
-      itemName: 'Italian Statuario Slab',
-      dimensions: '9 ft × 5 ft',
-      category: 'Marble',
-      finish: 'Polished',
-      thickness: '18 mm',
-      locationId: 'main-showroom',
-      locationName: 'Main Showroom',
-      unit: 'sq. ft',
-      systemQty: 5000,
-      physicalQty: 4870,
-      variance: -130,
-      variancePct: -2.6,
-      unitPriceInr: 700,
-      status: 'In Stock',
-      lastCountedAt: '18 min ago',
-    },
-    {
-      id: 'var-2',
-      itemCode: 'GRN-SLB-10X6',
-      itemName: 'Black Galaxy Granite',
-      dimensions: '10 ft × 6 ft',
-      category: 'Granite',
-      finish: 'Polished',
-      thickness: '20 mm',
-      locationId: 'marble-yard-north',
-      locationName: 'Marble Yard - North',
-      unit: 'sq. ft',
-      systemQty: 8000,
-      physicalQty: 8320,
-      variance: 320,
-      variancePct: 4.0,
-      unitPriceInr: 245,
-      status: 'Overstock',
-      lastCountedAt: '25 min ago',
-    },
-    {
       id: 'var-3',
       itemCode: 'TIL-BOX-2X2',
       itemName: 'Floor Tiles (Carrara Matte)',
@@ -598,25 +689,6 @@ function buildInitialSnapshot(): InventorySnapshot {
       lastCountedAt: '2 hrs ago',
     },
     {
-      id: 'var-5',
-      itemCode: 'ONX-SLB-8X5',
-      itemName: 'Honey Onyx Backlit Slab',
-      dimensions: '8 ft × 5 ft',
-      category: 'Onyx & Quartz',
-      finish: 'Polished',
-      thickness: '18 mm',
-      locationId: 'godown-2',
-      locationName: 'Slabs Godown - 2',
-      unit: 'sq. ft',
-      systemQty: 4200,
-      physicalQty: 4000,
-      variance: -200,
-      variancePct: -4.76,
-      unitPriceInr: 890,
-      status: 'Low Stock',
-      lastCountedAt: '3 hrs ago',
-    },
-    {
       id: 'var-6',
       itemCode: 'QRT-PCS-5X2',
       itemName: 'Calacatta Quartz Vanity',
@@ -655,25 +727,6 @@ function buildInitialSnapshot(): InventorySnapshot {
       lastCountedAt: '4 hrs ago',
     },
     {
-      id: 'var-8',
-      itemCode: 'MRB-SLB-9X5B',
-      itemName: 'Botticino Classico Slab',
-      dimensions: '9 ft × 5 ft',
-      category: 'Marble',
-      finish: 'Polished',
-      thickness: '18 mm',
-      locationId: 'kishangarh-hub',
-      locationName: 'Kishangarh Hub',
-      unit: 'sq. ft',
-      systemQty: 1950,
-      physicalQty: 1840,
-      variance: -110,
-      variancePct: -5.64,
-      unitPriceInr: 480,
-      status: 'Out of Stock',
-      lastCountedAt: '5 hrs ago',
-    },
-    {
       id: 'var-9',
       itemCode: 'GRN-PCS-4X1',
       itemName: 'Absolute Black Step Riser',
@@ -698,12 +751,14 @@ function buildInitialSnapshot(): InventorySnapshot {
     {
       id: 'slb-1',
       lotNumber: 'SL-001',
-      stoneName: 'Italian Marble',
+      stoneName: 'Italian Statuario Slab',
       category: 'Marble',
       dimensionsFt: '10 × 5 ft',
-      slabCountPcs: 1,
-      totalSqFt: 50,
+      slabCountPcs: 145,
+      systemSqFt: 7500,
+      totalSqFt: 7250,
       thicknessMm: 18,
+      unitPriceInr: 740,
       branchName: 'Main Showroom',
       finish: 'Polished',
       status: 'In Stock',
@@ -716,8 +771,10 @@ function buildInitialSnapshot(): InventorySnapshot {
       category: 'Marble',
       dimensionsFt: '10 × 5 ft',
       slabCountPcs: 1,
-      totalSqFt: 50,
+      systemSqFt: 0,
+      totalSqFt: 0,
       thicknessMm: 18,
+      unitPriceInr: 680,
       branchName: 'Main Showroom',
       finish: 'Polished',
       status: 'Out of Stock',
@@ -726,12 +783,14 @@ function buildInitialSnapshot(): InventorySnapshot {
     {
       id: 'slb-3',
       lotNumber: 'SL-003',
-      stoneName: 'Black Granite',
+      stoneName: 'Black Galaxy Granite',
       category: 'Granite',
-      dimensionsFt: '9 × 5 ft',
-      slabCountPcs: 1,
-      totalSqFt: 45,
+      dimensionsFt: '10 × 6 ft',
+      slabCountPcs: 138,
+      systemSqFt: 8200,
+      totalSqFt: 8320,
       thicknessMm: 20,
+      unitPriceInr: 245,
       branchName: 'Marble Yard - North',
       finish: 'Polished',
       status: 'In Stock',
@@ -742,10 +801,12 @@ function buildInitialSnapshot(): InventorySnapshot {
       lotNumber: 'SL-004',
       stoneName: 'Italian Statuario Extra',
       category: 'Marble',
-      dimensionsFt: '9.5 × 5.8 ft',
-      slabCountPcs: 42,
-      totalSqFt: 2314,
+      dimensionsFt: '9 × 5 ft',
+      slabCountPcs: 108,
+      systemSqFt: 5100,
+      totalSqFt: 4870,
       thicknessMm: 18,
+      unitPriceInr: 700,
       branchName: 'Main Showroom',
       finish: 'Polished',
       status: 'In Stock',
@@ -754,12 +815,14 @@ function buildInitialSnapshot(): InventorySnapshot {
     {
       id: 'slb-5',
       lotNumber: 'SL-005',
-      stoneName: 'Honey Onyx Translucent',
+      stoneName: 'Honey Onyx Backlit Slab',
       category: 'Onyx & Quartz',
-      dimensionsFt: '8.2 × 5.2 ft',
-      slabCountPcs: 24,
-      totalSqFt: 1023,
+      dimensionsFt: '8 × 5 ft',
+      slabCountPcs: 100,
+      systemSqFt: 4120,
+      totalSqFt: 4000,
       thicknessMm: 18,
+      unitPriceInr: 890,
       branchName: 'Slabs Godown - 2',
       finish: 'Polished',
       status: 'In Stock',
@@ -772,11 +835,29 @@ function buildInitialSnapshot(): InventorySnapshot {
       category: 'Marble',
       dimensionsFt: '7.5 × 4.8 ft',
       slabCountPcs: 36,
+      systemSqFt: 1296,
       totalSqFt: 1296,
       thicknessMm: 16,
+      unitPriceInr: 520,
       branchName: 'Slabs Godown - 1',
       finish: 'Honed',
       status: 'In Stock',
+      enabled: true,
+    },
+    {
+      id: 'slb-7',
+      lotNumber: 'SL-007',
+      stoneName: 'Botticino Classico Slab',
+      category: 'Marble',
+      dimensionsFt: '9 × 5 ft',
+      slabCountPcs: 40,
+      systemSqFt: 1920,
+      totalSqFt: 1840,
+      thicknessMm: 18,
+      unitPriceInr: 480,
+      branchName: 'Kishangarh Hub',
+      finish: 'Polished',
+      status: 'Out of Stock',
       enabled: true,
     },
   ];
@@ -787,7 +868,7 @@ function buildInitialSnapshot(): InventorySnapshot {
       billNo: 'PB-04-2024-1104',
       supplierName: 'Kishangarh Marble Depot',
       branchName: 'Main Showroom',
-      itemSummary: 'Italian Statuario Slab + 1 more',
+      itemSummary: 'Italian Statuario Slab · 18mm + 1 more',
       qty: 4200,
       unit: 'sq. ft',
       totalInr: 2856000,
@@ -797,18 +878,18 @@ function buildInitialSnapshot(): InventorySnapshot {
       items: [
         {
           id: 'pbi-1a',
-          itemCode: 'MRB-SLB-10X5',
-          itemName: 'Italian Statuario Slab',
-          dimensions: '10 ft × 5 ft',
+          itemCode: 'SL-001',
+          itemName: 'Italian Statuario Slab · 18mm',
+          dimensions: '10 × 5 ft',
           qty: 3000,
           unit: 'sq. ft',
           amountInr: 2100000,
         },
         {
           id: 'pbi-1b',
-          itemCode: 'MRB-SLB-9X5',
-          itemName: 'Italian Statuario Slab',
-          dimensions: '9 ft × 5 ft',
+          itemCode: 'SL-004',
+          itemName: 'Italian Statuario Extra · 18mm',
+          dimensions: '9 × 5 ft',
           qty: 1200,
           unit: 'sq. ft',
           amountInr: 756000,
@@ -844,7 +925,7 @@ function buildInitialSnapshot(): InventorySnapshot {
       billNo: 'PB-04-2024-1106',
       supplierName: 'Ongole Granite Quarries',
       branchName: 'Marble Yard - North',
-      itemSummary: 'Black Galaxy Granite',
+      itemSummary: 'Black Galaxy Granite · 20mm',
       qty: 5600,
       unit: 'sq. ft',
       totalInr: 1232000,
@@ -854,9 +935,9 @@ function buildInitialSnapshot(): InventorySnapshot {
       items: [
         {
           id: 'pbi-3a',
-          itemCode: 'GRN-SLB-10X6',
-          itemName: 'Black Galaxy Granite',
-          dimensions: '10 ft × 6 ft',
+          itemCode: 'SL-003',
+          itemName: 'Black Galaxy Granite · 20mm',
+          dimensions: '10 × 6 ft',
           qty: 5600,
           unit: 'sq. ft',
           amountInr: 1232000,
@@ -897,7 +978,7 @@ function buildInitialSnapshot(): InventorySnapshot {
       customerPhone: '+91 98204 11420',
       customerAddress: 'Plot 14, BKC Commercial Towers, Bandra East, Mumbai',
       branchName: 'Main Showroom',
-      itemSummary: 'Italian Statuario Slab + 1 more',
+      itemSummary: 'Italian Statuario Slab · 18mm + 1 more',
       qty: 2400,
       unit: 'sq. ft',
       totalInr: 1728000,
@@ -907,9 +988,9 @@ function buildInitialSnapshot(): InventorySnapshot {
       items: [
         {
           id: 'sbi-1a',
-          itemCode: 'MRB-SLB-10X5',
-          itemName: 'Italian Statuario Slab',
-          dimensions: '10 ft × 5 ft',
+          itemCode: 'SL-001',
+          itemName: 'Italian Statuario Slab · 18mm',
+          dimensions: '10 × 5 ft',
           qty: 1600,
           unit: 'sq. ft',
           amountInr: 1184000,
@@ -917,9 +998,9 @@ function buildInitialSnapshot(): InventorySnapshot {
         },
         {
           id: 'sbi-1b',
-          itemCode: 'MRB-SLB-9X5',
-          itemName: 'Italian Statuario Slab',
-          dimensions: '9 ft × 5 ft',
+          itemCode: 'SL-004',
+          itemName: 'Italian Statuario Extra · 18mm',
+          dimensions: '9 × 5 ft',
           qty: 800,
           unit: 'sq. ft',
           amountInr: 544000,
@@ -998,7 +1079,7 @@ function buildInitialSnapshot(): InventorySnapshot {
       customerPhone: '+91 98330 44105',
       customerAddress: 'Villa 9, Palm Beach Enclave, Navi Mumbai',
       branchName: 'Slabs Godown - 2',
-      itemSummary: 'Honey Onyx Backlit Slab',
+      itemSummary: 'Honey Onyx Backlit Slab · 18mm',
       qty: 680,
       unit: 'sq. ft',
       totalInr: 605200,
@@ -1008,9 +1089,9 @@ function buildInitialSnapshot(): InventorySnapshot {
       items: [
         {
           id: 'sbi-4a',
-          itemCode: 'ONX-SLB-8X5',
-          itemName: 'Honey Onyx Backlit Slab',
-          dimensions: '8 ft × 5 ft',
+          itemCode: 'SL-005',
+          itemName: 'Honey Onyx Backlit Slab · 18mm',
+          dimensions: '8 × 5 ft',
           qty: 680,
           unit: 'sq. ft',
           amountInr: 605200,
@@ -1023,41 +1104,41 @@ function buildInitialSnapshot(): InventorySnapshot {
   const history: ProductHistoryEntry[] = [
     {
       id: 'hist-1',
-      itemId: 'var-1',
-      itemCode: 'MRB-SLB-10X5',
+      itemId: 'slb-1',
+      itemCode: 'SL-001',
       type: 'Purchase',
-      referenceNo: 'PB-2024-1104',
-      quantityDelta: 4200,
+      referenceNo: 'PB-04-2024-1104',
+      quantityDelta: 3000,
       unit: 'sq. ft',
-      systemAfter: 9900,
-      physicalAfter: 9650,
+      systemAfter: 8850,
+      physicalAfter: 8850,
       branchName: 'Main Showroom',
-      partyOrNote: 'Kishangarh Marble Depot (Added to System Stock)',
+      partyOrNote: 'Kishangarh Marble Depot (Added to Slab Stock)',
       timestampLabel: '29 Apr 2024',
     },
     {
       id: 'hist-2',
-      itemId: 'var-1',
-      itemCode: 'MRB-SLB-10X5',
+      itemId: 'slb-1',
+      itemCode: 'SL-001',
       type: 'Sale',
       referenceNo: 'INV-8841',
-      quantityDelta: -2400,
+      quantityDelta: -1600,
       unit: 'sq. ft',
-      systemAfter: 7500,
+      systemAfter: 7250,
       physicalAfter: 7250,
       branchName: 'Main Showroom',
-      partyOrNote: 'Apex Horizon Builders (Subtracted from System & Physical)',
+      partyOrNote: 'Apex Horizon Builders (Subtracted from Slab Stock)',
       timestampLabel: '30 Apr 2024',
     },
     {
       id: 'hist-3',
-      itemId: 'var-1',
-      itemCode: 'MRB-SLB-10X5',
+      itemId: 'slb-1',
+      itemCode: 'SL-001',
       type: 'Transfer',
       referenceNo: 'TRF-2024-8841',
       quantityDelta: 1450,
       unit: 'sq. ft',
-      systemAfter: 7500,
+      systemAfter: 7250,
       physicalAfter: 7250,
       branchName: 'Kishangarh Hub → Main Showroom',
       partyOrNote: 'Inter-branch bundle dispatch',
@@ -1487,6 +1568,9 @@ function loadStore(): StoreSchema {
                 }
               }
             }
+          }
+          if (migrateUnifiedSlabs(parsed.snapshot)) {
+            migratedSlabs = true;
           }
           if (syncSuppliersFromPurchaseBills(parsed.snapshot)) {
             migratedSlabs = true;
@@ -2207,6 +2291,7 @@ async function startServer() {
       category: category || 'Marble',
       dimensionsFt: dimensionsFt?.trim() || '10 × 5 ft',
       slabCountPcs: Math.max(1, Math.round(slabCountPcs || 1)),
+      systemSqFt: normalizedStatus === 'Out of Stock' ? 0 : Number(Number(totalSqFt).toFixed(2)),
       totalSqFt: Number(Number(totalSqFt).toFixed(2)),
       thicknessMm: Math.max(1, Math.round(Number(thicknessMm) || 18)),
       branchName,
@@ -2396,21 +2481,41 @@ async function startServer() {
         res.status(400).json({error: 'Every item requires a product, positive qty, and unit.'});
         return;
       }
-      const matched = store.snapshot.varianceItems.find((i) => i.itemCode === raw.itemCode);
+      const matchedProduct = store.snapshot.varianceItems.find(
+        (i) => i.itemCode.toLowerCase() === raw.itemCode!.trim().toLowerCase(),
+      );
+      const matchedSlab = !matchedProduct
+        ? store.snapshot.slabs.find(
+            (s) => s.lotNumber.toLowerCase() === raw.itemCode!.trim().toLowerCase(),
+          )
+        : undefined;
       const qtyRounded = Math.round(raw.qty);
+      const fallbackRate = matchedProduct
+        ? matchedProduct.unitPriceInr
+        : matchedSlab
+          ? estimateSlabRateInr(matchedSlab, store.snapshot.varianceItems)
+          : 450;
       const amountRounded = Math.max(
         0,
         Math.round(
           raw.amountInr !== undefined && !Number.isNaN(Number(raw.amountInr))
             ? Number(raw.amountInr)
-            : qtyRounded * (matched?.unitPriceInr || 450),
+            : qtyRounded * fallbackRate,
         ),
       );
       normalizedItems.push({
         id: `pbi-${crypto.randomUUID().slice(0, 6)}`,
-        itemCode: raw.itemCode,
-        itemName: matched ? matched.itemName : raw.itemCode,
-        dimensions: matched ? matched.dimensions : 'Standard',
+        itemCode: matchedSlab ? matchedSlab.lotNumber : matchedProduct ? matchedProduct.itemCode : raw.itemCode,
+        itemName: matchedSlab
+          ? `${matchedSlab.stoneName} · ${matchedSlab.thicknessMm}mm`
+          : matchedProduct
+            ? matchedProduct.itemName
+            : raw.itemCode,
+        dimensions: matchedSlab
+          ? matchedSlab.dimensionsFt
+          : matchedProduct
+            ? matchedProduct.dimensions
+            : 'Standard',
         qty: qtyRounded,
         unit: raw.unit,
         amountInr: amountRounded,
@@ -2448,12 +2553,12 @@ async function startServer() {
     };
 
     store.snapshot.purchaseBills = [bill, ...store.snapshot.purchaseBills];
-    const loc = store.snapshot.locations.find((l) => l.name === bill.branchName);
 
     for (const line of normalizedItems) {
-      const item = store.snapshot.varianceItems.find((i) => i.itemCode === line.itemCode);
+      const item = store.snapshot.varianceItems.find(
+        (i) => i.itemCode.toLowerCase() === line.itemCode.toLowerCase(),
+      );
       if (item) {
-        // Purchase bill adds strictly to System Stock; Variance = Physical - System updates accordingly
         item.systemQty += line.qty;
         recomputeItemMetrics(item);
         item.lastCountedAt = 'Purchase bill posted';
@@ -2471,19 +2576,36 @@ async function startServer() {
           partyOrNote: `${bill.supplierName} (Added to System Stock)`,
           timestampLabel: 'Just now',
         });
+      } else {
+        const slab = store.snapshot.slabs.find(
+          (s) => s.lotNumber.toLowerCase() === line.itemCode.toLowerCase(),
+        );
+        if (slab) {
+          slab.systemSqFt = Math.max(
+            0,
+            Math.round((slab.systemSqFt ?? slab.totalSqFt) + line.qty),
+          );
+          slab.totalSqFt = Math.max(0, Math.round(slab.totalSqFt + line.qty));
+          slab.status = slab.totalSqFt > 0 ? 'In Stock' : 'Out of Stock';
+          pushHistory({
+            itemId: slab.id,
+            itemCode: slab.lotNumber,
+            type: 'Purchase',
+            referenceNo: bill.billNo,
+            quantityDelta: line.qty,
+            unit: line.unit,
+            systemAfter: slab.systemSqFt,
+            physicalAfter: slab.totalSqFt,
+            branchName: bill.branchName,
+            partyOrNote: `${bill.supplierName} (Added to Slab Stock)`,
+            timestampLabel: 'Just now',
+          });
+        }
       }
-      if (loc) {
-        if (line.unit === 'sq. ft') loc.sqftQty += line.qty;
-        if (line.unit === 'pcs') loc.pcsQty += line.qty;
-        if (line.unit === 'box') loc.boxQty += line.qty;
-      }
-    }
-
-    if (loc) {
-      loc.stockValueCr = Number((loc.stockValueCr + bill.totalInr / 10000000).toFixed(2));
     }
 
     syncSuppliersFromPurchaseBills(store.snapshot);
+    syncLocationsFromLedger(store.snapshot);
     store.snapshot.lastUpdatedAt = new Date().toISOString();
     saveStore();
     broadcastSnapshot();
@@ -2530,21 +2652,41 @@ async function startServer() {
         res.status(400).json({error: 'Every item requires a product, positive qty, and unit.'});
         return;
       }
-      const matched = store.snapshot.varianceItems.find((i) => i.itemCode === raw.itemCode);
+      const matchedProduct = store.snapshot.varianceItems.find(
+        (i) => i.itemCode.toLowerCase() === raw.itemCode!.trim().toLowerCase(),
+      );
+      const matchedSlab = !matchedProduct
+        ? store.snapshot.slabs.find(
+            (s) => s.lotNumber.toLowerCase() === raw.itemCode!.trim().toLowerCase(),
+          )
+        : undefined;
       const qtyRounded = Math.round(raw.qty);
+      const fallbackRate = matchedProduct
+        ? matchedProduct.unitPriceInr
+        : matchedSlab
+          ? estimateSlabRateInr(matchedSlab, store.snapshot.varianceItems)
+          : 450;
       const amountRounded = Math.max(
         0,
         Math.round(
           raw.amountInr !== undefined && !Number.isNaN(Number(raw.amountInr))
             ? Number(raw.amountInr)
-            : qtyRounded * (matched?.unitPriceInr || 450),
+            : qtyRounded * fallbackRate,
         ),
       );
       normalizedItems.push({
         id: `pbi-${crypto.randomUUID().slice(0, 6)}`,
-        itemCode: raw.itemCode,
-        itemName: matched ? matched.itemName : raw.itemCode,
-        dimensions: matched ? matched.dimensions : 'Standard',
+        itemCode: matchedSlab ? matchedSlab.lotNumber : matchedProduct ? matchedProduct.itemCode : raw.itemCode,
+        itemName: matchedSlab
+          ? `${matchedSlab.stoneName} · ${matchedSlab.thicknessMm}mm`
+          : matchedProduct
+            ? matchedProduct.itemName
+            : raw.itemCode,
+        dimensions: matchedSlab
+          ? matchedSlab.dimensionsFt
+          : matchedProduct
+            ? matchedProduct.dimensions
+            : 'Standard',
         qty: qtyRounded,
         unit: raw.unit,
         amountInr: amountRounded,
@@ -2554,27 +2696,30 @@ async function startServer() {
     // Reverse old stock impact
     const prevItems =
       Array.isArray(existing.items) && existing.items.length > 0 ? existing.items : [];
-    const oldLoc = store.snapshot.locations.find((l) => l.name === existing.branchName);
     for (const oldLine of prevItems) {
       const oldItem = oldLine.itemCode
-        ? store.snapshot.varianceItems.find((i) => i.itemCode === oldLine.itemCode)
+        ? store.snapshot.varianceItems.find(
+            (i) => i.itemCode.toLowerCase() === oldLine.itemCode.toLowerCase(),
+          )
         : store.snapshot.varianceItems.find(
             (i) => i.itemName.toLowerCase() === oldLine.itemName.toLowerCase(),
           );
       if (oldItem) {
         oldItem.systemQty = Math.max(0, oldItem.systemQty - oldLine.qty);
         recomputeItemMetrics(oldItem);
+      } else if (oldLine.itemCode) {
+        const oldSlab = store.snapshot.slabs.find(
+          (s) => s.lotNumber.toLowerCase() === oldLine.itemCode.toLowerCase(),
+        );
+        if (oldSlab) {
+          oldSlab.systemSqFt = Math.max(
+            0,
+            Math.round((oldSlab.systemSqFt ?? oldSlab.totalSqFt) - oldLine.qty),
+          );
+          oldSlab.totalSqFt = Math.max(0, Math.round(oldSlab.totalSqFt - oldLine.qty));
+          oldSlab.status = oldSlab.totalSqFt > 0 ? 'In Stock' : 'Out of Stock';
+        }
       }
-      if (oldLoc) {
-        if (oldLine.unit === 'sq. ft') oldLoc.sqftQty = Math.max(0, oldLoc.sqftQty - oldLine.qty);
-        if (oldLine.unit === 'pcs') oldLoc.pcsQty = Math.max(0, oldLoc.pcsQty - oldLine.qty);
-        if (oldLine.unit === 'box') oldLoc.boxQty = Math.max(0, oldLoc.boxQty - oldLine.qty);
-      }
-    }
-    if (oldLoc) {
-      oldLoc.stockValueCr = Number(
-        Math.max(0.5, oldLoc.stockValueCr - existing.totalInr / 10000000).toFixed(2),
-      );
     }
 
     const totalInr = normalizedItems.reduce((sum, it) => sum + it.amountInr, 0);
@@ -2616,9 +2761,10 @@ async function startServer() {
     store.snapshot.purchaseBills[billIndex] = updatedBill;
 
     // Apply new stock impact
-    const newLoc = store.snapshot.locations.find((l) => l.name === updatedBill.branchName);
     for (const line of normalizedItems) {
-      const item = store.snapshot.varianceItems.find((i) => i.itemCode === line.itemCode);
+      const item = store.snapshot.varianceItems.find(
+        (i) => i.itemCode.toLowerCase() === line.itemCode.toLowerCase(),
+      );
       if (item) {
         item.systemQty += line.qty;
         recomputeItemMetrics(item);
@@ -2637,20 +2783,36 @@ async function startServer() {
           partyOrNote: `${updatedBill.supplierName} (Purchase bill edited)`,
           timestampLabel: 'Just now',
         });
+      } else {
+        const slab = store.snapshot.slabs.find(
+          (s) => s.lotNumber.toLowerCase() === line.itemCode.toLowerCase(),
+        );
+        if (slab) {
+          slab.systemSqFt = Math.max(
+            0,
+            Math.round((slab.systemSqFt ?? slab.totalSqFt) + line.qty),
+          );
+          slab.totalSqFt = Math.max(0, Math.round(slab.totalSqFt + line.qty));
+          slab.status = slab.totalSqFt > 0 ? 'In Stock' : 'Out of Stock';
+          pushHistory({
+            itemId: slab.id,
+            itemCode: slab.lotNumber,
+            type: 'Purchase',
+            referenceNo: updatedBill.billNo,
+            quantityDelta: line.qty,
+            unit: line.unit,
+            systemAfter: slab.systemSqFt,
+            physicalAfter: slab.totalSqFt,
+            branchName: updatedBill.branchName,
+            partyOrNote: `${updatedBill.supplierName} (Purchase bill edited)`,
+            timestampLabel: 'Just now',
+          });
+        }
       }
-      if (newLoc) {
-        if (line.unit === 'sq. ft') newLoc.sqftQty += line.qty;
-        if (line.unit === 'pcs') newLoc.pcsQty += line.qty;
-        if (line.unit === 'box') newLoc.boxQty += line.qty;
-      }
-    }
-    if (newLoc) {
-      newLoc.stockValueCr = Number(
-        (newLoc.stockValueCr + updatedBill.totalInr / 10000000).toFixed(2),
-      );
     }
 
     syncSuppliersFromPurchaseBills(store.snapshot);
+    syncLocationsFromLedger(store.snapshot);
     store.snapshot.lastUpdatedAt = new Date().toISOString();
     saveStore();
     broadcastSnapshot();
@@ -2710,21 +2872,41 @@ async function startServer() {
         res.status(400).json({error: 'Every item requires a product, positive qty, and unit.'});
         return;
       }
-      const matched = store.snapshot.varianceItems.find((i) => i.itemCode === raw.itemCode);
+      const matchedProduct = store.snapshot.varianceItems.find(
+        (i) => i.itemCode.toLowerCase() === raw.itemCode!.trim().toLowerCase(),
+      );
+      const matchedSlab = !matchedProduct
+        ? store.snapshot.slabs.find(
+            (s) => s.lotNumber.toLowerCase() === raw.itemCode!.trim().toLowerCase(),
+          )
+        : undefined;
       const qtyRounded = Math.round(raw.qty);
+      const fallbackRate = matchedProduct
+        ? matchedProduct.unitPriceInr
+        : matchedSlab
+          ? estimateSlabRateInr(matchedSlab, store.snapshot.varianceItems)
+          : 500;
       const amountRounded = Math.max(
         0,
         Math.round(
           raw.amountInr !== undefined && !Number.isNaN(Number(raw.amountInr))
             ? Number(raw.amountInr)
-            : qtyRounded * (matched?.unitPriceInr || 500),
+            : qtyRounded * fallbackRate,
         ),
       );
       normalizedItems.push({
         id: `sbi-${crypto.randomUUID().slice(0, 6)}`,
-        itemCode: raw.itemCode,
-        itemName: matched ? matched.itemName : raw.itemCode,
-        dimensions: matched ? matched.dimensions : 'Standard',
+        itemCode: matchedSlab ? matchedSlab.lotNumber : matchedProduct ? matchedProduct.itemCode : raw.itemCode,
+        itemName: matchedSlab
+          ? `${matchedSlab.stoneName} · ${matchedSlab.thicknessMm}mm`
+          : matchedProduct
+            ? matchedProduct.itemName
+            : raw.itemCode,
+        dimensions: matchedSlab
+          ? matchedSlab.dimensionsFt
+          : matchedProduct
+            ? matchedProduct.dimensions
+            : 'Standard',
         qty: qtyRounded,
         unit: raw.unit,
         amountInr: amountRounded,
@@ -2763,12 +2945,12 @@ async function startServer() {
     };
 
     store.snapshot.salesBills = [bill, ...store.snapshot.salesBills];
-    const loc = store.snapshot.locations.find((l) => l.name === bill.branchName);
 
     for (const line of normalizedItems) {
-      const item = store.snapshot.varianceItems.find((i) => i.itemCode === line.itemCode);
+      const item = store.snapshot.varianceItems.find(
+        (i) => i.itemCode.toLowerCase() === line.itemCode.toLowerCase(),
+      );
       if (item) {
-        // Sales bill subtracts qty from System Stock AND updates/subtracts Physical Stock
         item.systemQty = Math.max(0, item.systemQty - line.qty);
         item.physicalQty = Math.max(0, item.physicalQty - line.qty);
         recomputeItemMetrics(item);
@@ -2787,14 +2969,35 @@ async function startServer() {
           partyOrNote: `${bill.customerName} (${line.status} · Subtracted from System & Physical)`,
           timestampLabel: 'Just now',
         });
-      }
-      if (loc) {
-        if (line.unit === 'sq. ft') loc.sqftQty = Math.max(0, loc.sqftQty - line.qty);
-        if (line.unit === 'pcs') loc.pcsQty = Math.max(0, loc.pcsQty - line.qty);
-        if (line.unit === 'box') loc.boxQty = Math.max(0, loc.boxQty - line.qty);
+      } else {
+        const slab = store.snapshot.slabs.find(
+          (s) => s.lotNumber.toLowerCase() === line.itemCode.toLowerCase(),
+        );
+        if (slab) {
+          slab.systemSqFt = Math.max(
+            0,
+            Math.round((slab.systemSqFt ?? slab.totalSqFt) - line.qty),
+          );
+          slab.totalSqFt = Math.max(0, Math.round(slab.totalSqFt - line.qty));
+          slab.status = slab.totalSqFt > 0 ? 'In Stock' : 'Out of Stock';
+          pushHistory({
+            itemId: slab.id,
+            itemCode: slab.lotNumber,
+            type: 'Sale',
+            referenceNo: bill.invoiceNo,
+            quantityDelta: -line.qty,
+            unit: line.unit,
+            systemAfter: slab.systemSqFt,
+            physicalAfter: slab.totalSqFt,
+            branchName: bill.branchName,
+            partyOrNote: `${bill.customerName} (${line.status} · Subtracted from Slab Stock)`,
+            timestampLabel: 'Just now',
+          });
+        }
       }
     }
 
+    syncLocationsFromLedger(store.snapshot);
     store.snapshot.lastUpdatedAt = new Date().toISOString();
     saveStore();
     broadcastSnapshot();
@@ -2855,21 +3058,41 @@ async function startServer() {
         res.status(400).json({error: 'Every item requires a product, positive qty, and unit.'});
         return;
       }
-      const matched = store.snapshot.varianceItems.find((i) => i.itemCode === raw.itemCode);
+      const matchedProduct = store.snapshot.varianceItems.find(
+        (i) => i.itemCode.toLowerCase() === raw.itemCode!.trim().toLowerCase(),
+      );
+      const matchedSlab = !matchedProduct
+        ? store.snapshot.slabs.find(
+            (s) => s.lotNumber.toLowerCase() === raw.itemCode!.trim().toLowerCase(),
+          )
+        : undefined;
       const qtyRounded = Math.round(raw.qty);
+      const fallbackRate = matchedProduct
+        ? matchedProduct.unitPriceInr
+        : matchedSlab
+          ? estimateSlabRateInr(matchedSlab, store.snapshot.varianceItems)
+          : 500;
       const amountRounded = Math.max(
         0,
         Math.round(
           raw.amountInr !== undefined && !Number.isNaN(Number(raw.amountInr))
             ? Number(raw.amountInr)
-            : qtyRounded * (matched?.unitPriceInr || 500),
+            : qtyRounded * fallbackRate,
         ),
       );
       normalizedItems.push({
         id: `sbi-${crypto.randomUUID().slice(0, 6)}`,
-        itemCode: raw.itemCode,
-        itemName: matched ? matched.itemName : raw.itemCode,
-        dimensions: matched ? matched.dimensions : 'Standard',
+        itemCode: matchedSlab ? matchedSlab.lotNumber : matchedProduct ? matchedProduct.itemCode : raw.itemCode,
+        itemName: matchedSlab
+          ? `${matchedSlab.stoneName} · ${matchedSlab.thicknessMm}mm`
+          : matchedProduct
+            ? matchedProduct.itemName
+            : raw.itemCode,
+        dimensions: matchedSlab
+          ? matchedSlab.dimensionsFt
+          : matchedProduct
+            ? matchedProduct.dimensions
+            : 'Standard',
         qty: qtyRounded,
         unit: raw.unit,
         amountInr: amountRounded,
@@ -2880,10 +3103,11 @@ async function startServer() {
     // Reverse old stock deductions
     const prevItems =
       Array.isArray(existing.items) && existing.items.length > 0 ? existing.items : [];
-    const oldLoc = store.snapshot.locations.find((l) => l.name === existing.branchName);
     for (const oldLine of prevItems) {
       const oldItem = oldLine.itemCode
-        ? store.snapshot.varianceItems.find((i) => i.itemCode === oldLine.itemCode)
+        ? store.snapshot.varianceItems.find(
+            (i) => i.itemCode.toLowerCase() === oldLine.itemCode.toLowerCase(),
+          )
         : store.snapshot.varianceItems.find(
             (i) => i.itemName.toLowerCase() === oldLine.itemName.toLowerCase(),
           );
@@ -2891,11 +3115,18 @@ async function startServer() {
         oldItem.systemQty += oldLine.qty;
         oldItem.physicalQty += oldLine.qty;
         recomputeItemMetrics(oldItem);
-      }
-      if (oldLoc) {
-        if (oldLine.unit === 'sq. ft') oldLoc.sqftQty += oldLine.qty;
-        if (oldLine.unit === 'pcs') oldLoc.pcsQty += oldLine.qty;
-        if (oldLine.unit === 'box') oldLoc.boxQty += oldLine.qty;
+      } else if (oldLine.itemCode) {
+        const oldSlab = store.snapshot.slabs.find(
+          (s) => s.lotNumber.toLowerCase() === oldLine.itemCode.toLowerCase(),
+        );
+        if (oldSlab) {
+          oldSlab.systemSqFt = Math.max(
+            0,
+            Math.round((oldSlab.systemSqFt ?? oldSlab.totalSqFt) + oldLine.qty),
+          );
+          oldSlab.totalSqFt = Math.max(0, Math.round(oldSlab.totalSqFt + oldLine.qty));
+          oldSlab.status = oldSlab.totalSqFt > 0 ? 'In Stock' : 'Out of Stock';
+        }
       }
     }
 
@@ -2932,9 +3163,10 @@ async function startServer() {
     store.snapshot.salesBills[billIndex] = updatedBill;
 
     // Apply updated stock deductions
-    const newLoc = store.snapshot.locations.find((l) => l.name === updatedBill.branchName);
     for (const line of normalizedItems) {
-      const item = store.snapshot.varianceItems.find((i) => i.itemCode === line.itemCode);
+      const item = store.snapshot.varianceItems.find(
+        (i) => i.itemCode.toLowerCase() === line.itemCode.toLowerCase(),
+      );
       if (item) {
         item.systemQty = Math.max(0, item.systemQty - line.qty);
         item.physicalQty = Math.max(0, item.physicalQty - line.qty);
@@ -2954,14 +3186,35 @@ async function startServer() {
           partyOrNote: `${updatedBill.customerName} (Sales bill edited · ${line.status})`,
           timestampLabel: 'Just now',
         });
-      }
-      if (newLoc) {
-        if (line.unit === 'sq. ft') newLoc.sqftQty = Math.max(0, newLoc.sqftQty - line.qty);
-        if (line.unit === 'pcs') newLoc.pcsQty = Math.max(0, newLoc.pcsQty - line.qty);
-        if (line.unit === 'box') newLoc.boxQty = Math.max(0, newLoc.boxQty - line.qty);
+      } else {
+        const slab = store.snapshot.slabs.find(
+          (s) => s.lotNumber.toLowerCase() === line.itemCode.toLowerCase(),
+        );
+        if (slab) {
+          slab.systemSqFt = Math.max(
+            0,
+            Math.round((slab.systemSqFt ?? slab.totalSqFt) - line.qty),
+          );
+          slab.totalSqFt = Math.max(0, Math.round(slab.totalSqFt - line.qty));
+          slab.status = slab.totalSqFt > 0 ? 'In Stock' : 'Out of Stock';
+          pushHistory({
+            itemId: slab.id,
+            itemCode: slab.lotNumber,
+            type: 'Sale',
+            referenceNo: updatedBill.invoiceNo,
+            quantityDelta: -line.qty,
+            unit: line.unit,
+            systemAfter: slab.systemSqFt,
+            physicalAfter: slab.totalSqFt,
+            branchName: updatedBill.branchName,
+            partyOrNote: `${updatedBill.customerName} (Sales bill edited · ${line.status})`,
+            timestampLabel: 'Just now',
+          });
+        }
       }
     }
 
+    syncLocationsFromLedger(store.snapshot);
     store.snapshot.lastUpdatedAt = new Date().toISOString();
     saveStore();
     broadcastSnapshot();
@@ -3077,16 +3330,28 @@ async function startServer() {
       res.status(400).json({error: 'Item, source, destination, and positive quantity are required.'});
       return;
     }
-    const refItem = store.snapshot.varianceItems.find((i) => i.itemCode === itemCode);
-    const unit: UnitType = refItem?.unit || 'sq. ft';
-    const valueCr = Number(
-      (((refItem?.unitPriceInr || 450) * quantity) / 10000000).toFixed(2),
+    const refItem = store.snapshot.varianceItems.find(
+      (i) => i.itemCode.toLowerCase() === itemCode.toLowerCase(),
     );
+    const refSlab = !refItem
+      ? store.snapshot.slabs.find(
+          (s) => s.lotNumber.toLowerCase() === itemCode.toLowerCase(),
+        )
+      : undefined;
+    const unit: UnitType = refItem?.unit || 'sq. ft';
+    const rate = refItem
+      ? refItem.unitPriceInr
+      : refSlab
+        ? estimateSlabRateInr(refSlab, store.snapshot.varianceItems)
+        : 450;
+    const valueCr = Number(((rate * quantity) / 10000000).toFixed(2));
     const transfer: StockTransfer = {
       id: `tr-${crypto.randomUUID().slice(0, 6)}`,
       transferCode: `TRF-2024-${Math.floor(8850 + Math.random() * 900)}`,
-      itemCode,
-      itemName: refItem?.itemName || itemCode,
+      itemCode: refSlab ? refSlab.lotNumber : refItem ? refItem.itemCode : itemCode,
+      itemName: refSlab
+        ? `${refSlab.stoneName} · ${refSlab.thicknessMm}mm`
+        : refItem?.itemName || itemCode,
       fromLocation,
       toLocation,
       quantity: Math.round(quantity),
@@ -3108,6 +3373,20 @@ async function startServer() {
         physicalAfter: refItem.physicalQty,
         branchName: `${fromLocation} → ${toLocation}`,
         partyOrNote: `Inter-branch transfer (${transfer.status})`,
+        timestampLabel: 'Just now',
+      });
+    } else if (refSlab) {
+      pushHistory({
+        itemId: refSlab.id,
+        itemCode: refSlab.lotNumber,
+        type: 'Transfer',
+        referenceNo: transfer.transferCode,
+        quantityDelta: transfer.quantity,
+        unit: transfer.unit,
+        systemAfter: refSlab.totalSqFt,
+        physicalAfter: refSlab.totalSqFt,
+        branchName: `${fromLocation} → ${toLocation}`,
+        partyOrNote: `Inter-branch slab transfer (${transfer.status})`,
         timestampLabel: 'Just now',
       });
     }

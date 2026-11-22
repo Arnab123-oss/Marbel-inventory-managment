@@ -386,35 +386,65 @@ export function ProductActionModal({
             </div>
           )}
 
-          {mode === 'view' && target.kind === 'slab' && (
+          {mode === 'view' && target.kind === 'slab' && (() => {
+            const physicalQty =
+              target.slab.status === 'Out of Stock' ? 0 : Math.max(0, target.slab.totalSqFt);
+            const systemQty =
+              typeof target.slab.systemSqFt === 'number'
+                ? Math.max(0, target.slab.systemSqFt)
+                : physicalQty;
+            const variance = Number((physicalQty - systemQty).toFixed(2));
+            return (
             <div className="space-y-5">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="p-3.5 rounded-lg bg-[#FAFBFD] border border-[#E5E9F0]">
-                  <div className="text-[11px] font-medium text-[#64748B]">Slab ID</div>
-                  <div className="mt-1 text-[18px] font-mono font-bold text-[#0F172A]">
-                    {target.slab.lotNumber}
-                  </div>
-                </div>
-                <div className="p-3.5 rounded-lg bg-[#FAFBFD] border border-[#E5E9F0]">
-                  <div className="text-[11px] font-medium text-[#64748B]">Total Area</div>
+                  <div className="text-[11px] font-medium text-[#64748B]">System Stock</div>
                   <div className="mt-1 text-[18px] font-bold text-[#0F172A] tabular-nums">
-                    {target.slab.totalSqFt.toLocaleString('en-IN')}{' '}
+                    {systemQty.toLocaleString('en-IN')}{' '}
                     <span className="text-[12px] font-medium text-[#64748B]">sq. ft</span>
                   </div>
+                  <div className="mt-1 text-[10.5px] text-[#64748B]">
+                    From Purchase Bills − Sales Bills
+                  </div>
                 </div>
                 <div className="p-3.5 rounded-lg bg-[#FAFBFD] border border-[#E5E9F0]">
-                  <div className="text-[11px] font-medium text-[#64748B]">Status</div>
+                  <div className="text-[11px] font-medium text-[#64748B]">Physical Stock</div>
+                  <div className="mt-1 text-[18px] font-bold text-[#0F172A] tabular-nums">
+                    {physicalQty.toLocaleString('en-IN')}{' '}
+                    <span className="text-[12px] font-medium text-[#64748B]">sq. ft</span>
+                  </div>
+                  <div className="mt-1 text-[10.5px] text-[#64748B]">
+                    Updated by Sales &amp; Yard Count
+                  </div>
+                </div>
+                <div className="p-3.5 rounded-lg bg-[#FAFBFD] border border-[#E5E9F0]">
+                  <div className="text-[11px] font-medium text-[#64748B]">
+                    Variance (Physical − System)
+                  </div>
                   <div
-                    className={`mt-1 text-[18px] font-bold ${
-                      target.slab.status === 'In Stock' ? 'text-[#16A34A]' : 'text-[#DC2626]'
+                    className={`mt-1 text-[18px] font-bold tabular-nums ${
+                      variance < 0
+                        ? 'text-[#DC2626]'
+                        : variance > 0
+                          ? 'text-[#16A34A]'
+                          : 'text-[#0F172A]'
                     }`}
                   >
-                    {target.slab.status}
+                    {variance > 0
+                      ? `+${variance.toLocaleString('en-IN')}`
+                      : variance.toLocaleString('en-IN')}{' '}
+                    <span className="text-[12px] font-medium">sq. ft</span>
                   </div>
                 </div>
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 pt-2 border-t border-[#F1F5F9] text-[12.5px]">
+                <div>
+                  <div className="text-[11px] text-[#64748B]">Slab Code</div>
+                  <div className="font-mono font-semibold text-[#0F172A] mt-0.5">
+                    {target.slab.lotNumber}
+                  </div>
+                </div>
                 <div>
                   <div className="text-[11px] text-[#64748B]">Category</div>
                   <div className="font-semibold text-[#0F172A] mt-0.5">
@@ -422,15 +452,19 @@ export function ProductActionModal({
                   </div>
                 </div>
                 <div>
-                  <div className="text-[11px] text-[#64748B]">Dimensions</div>
-                  <div className="font-mono font-semibold text-[#2563EB] mt-0.5">
-                    {target.slab.dimensionsFt}
+                  <div className="text-[11px] text-[#64748B]">Status</div>
+                  <div
+                    className={`font-semibold mt-0.5 ${
+                      target.slab.status === 'In Stock' ? 'text-[#16A34A]' : 'text-[#DC2626]'
+                    }`}
+                  >
+                    {target.slab.status}
                   </div>
                 </div>
                 <div>
-                  <div className="text-[11px] text-[#64748B]">Slab Count</div>
-                  <div className="font-semibold text-[#0F172A] tabular-nums mt-0.5">
-                    {target.slab.slabCountPcs} pcs
+                  <div className="text-[11px] text-[#64748B]">Dimensions</div>
+                  <div className="font-mono font-semibold text-[#2563EB] mt-0.5">
+                    {target.slab.dimensionsFt}
                   </div>
                 </div>
                 <div>
@@ -447,7 +481,8 @@ export function ProductActionModal({
                 </div>
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {mode === 'edit' && target.kind === 'product' && (
             <form onSubmit={handleSaveEdit} className="space-y-4">

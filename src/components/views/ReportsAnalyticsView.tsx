@@ -13,6 +13,7 @@ import type {
   LocationRow,
   PurchaseBill,
   SalesBill,
+  SlabLot,
   StoneCategory,
   VarianceItem,
 } from '../../types/inventory';
@@ -109,14 +110,27 @@ function resolveCategory(
   itemCode: string,
   itemName: string,
   products: VarianceItem[],
+  slabs: SlabLot[] = [],
 ): StoneCategory {
   if (itemCode) {
+    const normCode = itemCode.trim().toLowerCase();
+    const bySlabCode = slabs.find(
+      (s) => s.lotNumber.trim().toLowerCase() === normCode,
+    );
+    if (bySlabCode) return bySlabCode.category;
     const byCode = products.find(
-      (p) => p.itemCode.toLowerCase() === itemCode.trim().toLowerCase(),
+      (p) => p.itemCode.trim().toLowerCase() === normCode,
     );
     if (byCode) return byCode.category;
   }
   const lower = itemName.toLowerCase();
+  const bySlabName = slabs.find(
+    (s) =>
+      s.stoneName.toLowerCase() === lower ||
+      lower.includes(s.stoneName.toLowerCase()) ||
+      s.stoneName.toLowerCase().includes(lower),
+  );
+  if (bySlabName) return bySlabName.category;
   const byName = products.find(
     (p) =>
       p.itemName.toLowerCase() === lower ||
@@ -305,13 +319,23 @@ export function ReportsAnalyticsView({
 
     for (const bill of salesBills) {
       for (const line of getSalesBillLines(bill)) {
-        const cat = resolveCategory(line.itemCode, line.itemName, snapshot.varianceItems);
+        const cat = resolveCategory(
+          line.itemCode,
+          line.itemName,
+          snapshot.varianceItems,
+          snapshot.slabs,
+        );
         catSales[cat] += Math.max(0, Number(line.amountInr) || 0);
       }
     }
     for (const bill of purchaseBills) {
       for (const line of getPurchaseBillLines(bill)) {
-        const cat = resolveCategory(line.itemCode, line.itemName, snapshot.varianceItems);
+        const cat = resolveCategory(
+          line.itemCode,
+          line.itemName,
+          snapshot.varianceItems,
+          snapshot.slabs,
+        );
         catPurchase[cat] += Math.max(0, Number(line.amountInr) || 0);
       }
     }
@@ -392,6 +416,22 @@ export function ReportsAnalyticsView({
       }
     >();
 
+    for (const s of activeSlabs) {
+      const key = s.lotNumber.trim().toLowerCase();
+      const inStockSqft = s.status === 'In Stock' ? Math.max(0, s.totalSqFt) : 0;
+      const rate = estimateSlabRateInr(s, snapshot.varianceItems);
+      skuMap.set(key, {
+        itemCode: s.lotNumber,
+        itemName: `${s.stoneName} · ${s.thicknessMm}mm`,
+        category: s.category,
+        unit: 'sq. ft',
+        physicalQty: inStockSqft,
+        stockValueInr: Math.round(inStockSqft * rate),
+        salesInr: 0,
+        purchaseInr: 0,
+      });
+    }
+
     for (const p of activeProducts) {
       const key = p.itemCode.trim().toLowerCase();
       skuMap.set(key, {
@@ -435,7 +475,12 @@ export function ReportsAnalyticsView({
         existing = {
           itemCode: fallbackCode,
           itemName: rawName.trim() || fallbackCode,
-          category: resolveCategory(fallbackCode, rawName, snapshot.varianceItems),
+          category: resolveCategory(
+            fallbackCode,
+            rawName,
+            snapshot.varianceItems,
+            snapshot.slabs,
+          ),
           unit: rawUnit || 'sq. ft',
           physicalQty: 0,
           stockValueInr: 0,

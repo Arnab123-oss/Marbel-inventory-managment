@@ -796,6 +796,7 @@ export default function App() {
           <TopProductsWidget
             salesBills={currentSnapshot.salesBills}
             varianceItems={currentSnapshot.varianceItems}
+            slabs={currentSnapshot.slabs}
             onViewProducts={() => setActiveSection('products')}
           />
         );
