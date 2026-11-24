@@ -6,6 +6,7 @@ import {
   PackageCheck,
   ShoppingCart,
   SlidersHorizontal,
+  Undo2,
   Upload,
   X,
 } from 'lucide-react';
@@ -832,7 +833,9 @@ export function ProductActionModal({
                           ? ShoppingCart
                           : entry.type === 'Transfer'
                             ? ArrowLeftRight
-                            : SlidersHorizontal;
+                            : entry.type === 'Return'
+                              ? Undo2
+                              : SlidersHorizontal;
                     const typeColor =
                       entry.type === 'Purchase'
                         ? 'text-[#16A34A]'
@@ -840,7 +843,9 @@ export function ProductActionModal({
                           ? 'text-[#DC2626]'
                           : entry.type === 'Transfer'
                             ? 'text-[#2563EB]'
-                            : 'text-[#D97706]';
+                            : entry.type === 'Return'
+                              ? 'text-[#7C3AED]'
+                              : 'text-[#D97706]';
 
                     return (
                       <div

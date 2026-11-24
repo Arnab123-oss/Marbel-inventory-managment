@@ -13,6 +13,8 @@ import type {
   ProductHistoryEntry,
   PurchaseBill,
   PurchaseBillItem,
+  PurchaseReturn,
+  PurchaseReturnItem,
   SalesBill,
   SalesBillItem,
   SalesPaymentStatus,
@@ -57,18 +59,19 @@ const DEFAULT_KPI_ORDER: KpiId[] = [
 ];
 
 const DEFAULT_WIDGET_ORDER: WidgetId[] = [
+  'outstandingPayments',
   'salesTrend',
   'valueTrend',
   'stockValueByLocation',
   'topProducts',
   'recentActivities',
   'stockStatusSummary',
-  'accuracyTrend',
   'topVarianceItems',
   'recentAlerts',
 ];
 
 const DEFAULT_WIDGET_SPANS: Record<WidgetId, 1 | 2 | 3> = {
+  outstandingPayments: 3,
   salesTrend: 1,
   topProducts: 1,
   recentActivities: 2,
@@ -418,6 +421,25 @@ function formatPurchaseBillNoServer(
   return `PB-${month}-${year}-${suffix || fallbackSuffix}`;
 }
 
+function formatPurchaseReturnNoServer(
+  rawReturnNo: string | undefined,
+  dateIso?: string,
+  dateLabel?: string,
+): string {
+  const resolvedIso =
+    dateIso && /^\d{4}-\d{2}-\d{2}$/.test(dateIso.trim())
+      ? dateIso.trim()
+      : parseDateLabelToIsoServer(dateLabel);
+  const [year, month] = resolvedIso.split('-');
+  const fallbackSuffix = String(Math.floor(2100 + Math.random() * 700));
+  const trimmed = rawReturnNo?.trim() || '';
+  const suffix = trimmed
+    .replace(/^RET-\d{2}-\d{4}-/i, '')
+    .replace(/^RET-/i, '')
+    .trim();
+  return `RET-${month}-${year}-${suffix || fallbackSuffix}`;
+}
+
 function formatInvoiceNoServer(rawInvoiceNo?: string): string {
   const fallback = String(Math.floor(8850 + Math.random() * 900));
   const trimmed = rawInvoiceNo?.trim() || '';
@@ -486,6 +508,171 @@ function syncSuppliersFromPurchaseBills(snapshot: InventorySnapshot): boolean {
     }
   }
   return changed;
+}
+
+function daysAgoIsoServer(days: number): string {
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+const SEEDED_AGE_DAYS_BY_CODE: Record<string, number> = {
+  'SL-001': 28,
+  'SL-002': 240,
+  'SL-003': 242,
+  'SL-004': 124,
+  'SL-005': 54,
+  'SL-006': 138,
+  'SL-007': 205,
+  'TIL-BOX-2X2': 35,
+  'ADH-BAG-20KG': 198,
+  'GRT-KG-5KG': 230,
+  'MRB-PCS-4X1': 215,
+  'QRT-PCS-5X2': 114,
+  'TRA-BOX-4X2': 42,
+  'GRN-PCS-4X1': 48,
+};
+
+function ensureStockedDatesServer(snap: InventorySnapshot): boolean {
+  let changed = false;
+  if (Array.isArray(snap.varianceItems)) {
+    for (let idx = 0; idx < snap.varianceItems.length; idx++) {
+      const item = snap.varianceItems[idx];
+      if (!item.stockedDateIso) {
+        const key = (item.itemCode || '').trim().toUpperCase();
+        const ageDays = SEEDED_AGE_DAYS_BY_CODE[key] ?? (105 + (idx % 5) * 28);
+        item.stockedDateIso = daysAgoIsoServer(ageDays);
+        changed = true;
+      }
+    }
+  }
+  if (Array.isArray(snap.slabs)) {
+    for (let idx = 0; idx < snap.slabs.length; idx++) {
+      const slab = snap.slabs[idx];
+      if (!slab.stockedDateIso) {
+        const key = (slab.lotNumber || '').trim().toUpperCase();
+        const ageDays = SEEDED_AGE_DAYS_BY_CODE[key] ?? (110 + (idx % 5) * 32);
+        slab.stockedDateIso = daysAgoIsoServer(ageDays);
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+function formatIsoToDateLabelServer(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return iso;
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  const mon = months[Math.max(0, Math.min(11, Number(m[2]) - 1))];
+  return `${Number(m[3])} ${mon} ${m[1]}`;
+}
+
+function ensureCrossBranchTrendingBillsServer(snap: InventorySnapshot): boolean {
+  if (snap.crossBranchSeedApplied) return false;
+  let changed = false;
+  if (!Array.isArray(snap.salesBills)) snap.salesBills = [];
+
+  const inv8845Iso = daysAgoIsoServer(5);
+  const inv8846Iso = daysAgoIsoServer(3);
+
+  if (!snap.salesBills.some((b) => b.invoiceNo === 'INV-8845')) {
+    snap.salesBills.unshift({
+      id: 'sb-5',
+      invoiceNo: 'INV-8845',
+      customerName: 'Kothari Villa Interiors',
+      customerPhone: '+91 98330 44105',
+      customerAddress: 'Villa 9, Palm Beach Enclave, Navi Mumbai',
+      branchName: 'Display Annex',
+      itemSummary: 'Makrana Albeta White · 16mm + 1 more',
+      qty: 660,
+      unit: 'sq. ft',
+      totalInr: 372000,
+      status: 'Paid',
+      dateLabel: formatIsoToDateLabelServer(inv8845Iso),
+      dateIso: inv8845Iso,
+      items: [
+        {
+          id: 'sbi-5a',
+          itemCode: 'SL-006',
+          itemName: 'Makrana Albeta White · 16mm',
+          dimensions: '7.5 × 4.8 ft',
+          qty: 480,
+          unit: 'sq. ft',
+          amountInr: 249600,
+          status: 'Paid',
+        },
+        {
+          id: 'sbi-5b',
+          itemCode: 'MRB-PCS-4X1',
+          itemName: 'Makrana CNC Border',
+          dimensions: '4 ft × 1 ft',
+          qty: 180,
+          unit: 'pcs',
+          amountInr: 122400,
+          status: 'Paid',
+        },
+      ],
+    });
+    changed = true;
+  }
+
+  if (!snap.salesBills.some((b) => b.invoiceNo === 'INV-8846')) {
+    snap.salesBills.unshift({
+      id: 'sb-6',
+      invoiceNo: 'INV-8846',
+      customerName: 'Apex Horizon Builders',
+      customerPhone: '+91 98204 11420',
+      customerAddress: 'Plot 14, BKC Commercial Towers, Bandra East, Mumbai',
+      branchName: 'Main Showroom',
+      itemSummary: 'Black Galaxy Granite · 20mm + 1 more',
+      qty: 1885,
+      unit: 'sq. ft',
+      totalInr: 490300,
+      status: 'Paid',
+      dateLabel: formatIsoToDateLabelServer(inv8846Iso),
+      dateIso: inv8846Iso,
+      items: [
+        {
+          id: 'sbi-6a',
+          itemCode: 'SL-003',
+          itemName: 'Black Galaxy Granite · 20mm',
+          dimensions: '10 × 6 ft',
+          qty: 1800,
+          unit: 'sq. ft',
+          amountInr: 441000,
+          status: 'Paid',
+        },
+        {
+          id: 'sbi-6b',
+          itemCode: 'ADH-BAG-20KG',
+          itemName: 'Tile Adhesive',
+          dimensions: '20 kg Pack',
+          qty: 85,
+          unit: 'bag',
+          amountInr: 49300,
+          status: 'Paid',
+        },
+      ],
+    });
+    changed = true;
+  }
+
+  snap.crossBranchSeedApplied = true;
+  return changed || true;
 }
 
 function buildInitialSnapshot(): InventorySnapshot {
@@ -1447,12 +1634,15 @@ function buildInitialSnapshot(): InventorySnapshot {
     history,
     slabs,
     purchaseBills,
+    purchaseReturns: [],
     salesBills,
     customers,
     suppliers,
     alerts,
     transfers,
   };
+  ensureStockedDatesServer(initialSnap);
+  ensureCrossBranchTrendingBillsServer(initialSnap);
   syncSuppliersFromPurchaseBills(initialSnap);
   syncLocationsFromLedger(initialSnap);
   return initialSnap;
@@ -1569,7 +1759,17 @@ function loadStore(): StoreSchema {
               }
             }
           }
+          if (!Array.isArray(parsed.snapshot.purchaseReturns)) {
+            parsed.snapshot.purchaseReturns = [];
+            migratedSlabs = true;
+          }
           if (migrateUnifiedSlabs(parsed.snapshot)) {
+            migratedSlabs = true;
+          }
+          if (ensureStockedDatesServer(parsed.snapshot)) {
+            migratedSlabs = true;
+          }
+          if (ensureCrossBranchTrendingBillsServer(parsed.snapshot)) {
             migratedSlabs = true;
           }
           if (syncSuppliersFromPurchaseBills(parsed.snapshot)) {
@@ -2071,6 +2271,7 @@ async function startServer() {
       unitPriceInr: unitPriceInr || 450,
       status: qty === 0 ? 'Out of Stock' : 'In Stock',
       lastCountedAt: 'Added just now',
+      stockedDateIso: new Date().toISOString().slice(0, 10),
       imageUrl: imageUrl?.trim() || undefined,
       enabled: true,
     };
@@ -2297,6 +2498,7 @@ async function startServer() {
       branchName,
       finish: finish || 'Polished',
       status: normalizedStatus,
+      stockedDateIso: new Date().toISOString().slice(0, 10),
       enabled: true,
     };
     store.snapshot.slabs = [slab, ...store.snapshot.slabs];
@@ -2817,6 +3019,335 @@ async function startServer() {
     saveStore();
     broadcastSnapshot();
     res.json({bill: updatedBill, snapshot: store.snapshot});
+  });
+
+  app.post('/api/inventory/returns', requireAuth, (req: Request, res: Response) => {
+    const body = req.body as {
+      returnNo?: string;
+      supplierName?: string;
+      branchName?: string;
+      purchaseBillId?: string;
+      reason?: string;
+      notes?: string;
+      dateLabel?: string;
+      dateIso?: string;
+      items?: Array<{
+        itemCode?: string;
+        qty?: number;
+        unit?: UnitType;
+        amountInr?: number;
+        reason?: string;
+      }>;
+    };
+
+    const {returnNo, supplierName, branchName, purchaseBillId, reason, notes, dateLabel, dateIso} =
+      body;
+
+    if (
+      !supplierName?.trim() ||
+      !branchName?.trim() ||
+      !reason?.trim() ||
+      !Array.isArray(body.items) ||
+      body.items.length === 0
+    ) {
+      res.status(400).json({
+        error: 'Supplier, branch, return reason, and at least one return item are required.',
+      });
+      return;
+    }
+
+    const normalizedItems: PurchaseReturnItem[] = [];
+    for (const raw of body.items) {
+      if (!raw.itemCode || !raw.qty || raw.qty <= 0 || !raw.unit) {
+        res.status(400).json({
+          error: 'Every returned item requires a product, positive quantity, and unit.',
+        });
+        return;
+      }
+      const codeNorm = raw.itemCode.trim().toLowerCase();
+      const matchedProduct =
+        store.snapshot.varianceItems.find(
+          (i) =>
+            i.itemCode.toLowerCase() === codeNorm &&
+            i.locationName.trim().toLowerCase() === branchName.trim().toLowerCase(),
+        ) || store.snapshot.varianceItems.find((i) => i.itemCode.toLowerCase() === codeNorm);
+      const matchedSlab = !matchedProduct
+        ? store.snapshot.slabs.find(
+            (s) =>
+              s.lotNumber.toLowerCase() === codeNorm &&
+              s.branchName.trim().toLowerCase() === branchName.trim().toLowerCase(),
+          ) || store.snapshot.slabs.find((s) => s.lotNumber.toLowerCase() === codeNorm)
+        : undefined;
+
+      const qtyRounded = Math.round(raw.qty);
+      const fallbackRate = matchedProduct
+        ? matchedProduct.unitPriceInr
+        : matchedSlab
+          ? estimateSlabRateInr(matchedSlab, store.snapshot.varianceItems)
+          : 450;
+      const amountRounded = Math.max(
+        0,
+        Math.round(
+          raw.amountInr !== undefined && !Number.isNaN(Number(raw.amountInr))
+            ? Number(raw.amountInr)
+            : qtyRounded * fallbackRate,
+        ),
+      );
+
+      normalizedItems.push({
+        id: `pri-${crypto.randomUUID().slice(0, 6)}`,
+        itemCode: matchedSlab
+          ? matchedSlab.lotNumber
+          : matchedProduct
+            ? matchedProduct.itemCode
+            : raw.itemCode.trim(),
+        itemName: matchedSlab
+          ? `${matchedSlab.stoneName} · ${matchedSlab.thicknessMm}mm`
+          : matchedProduct
+            ? matchedProduct.itemName
+            : raw.itemCode.trim(),
+        dimensions: matchedSlab
+          ? matchedSlab.dimensionsFt
+          : matchedProduct
+            ? matchedProduct.dimensions
+            : 'Standard',
+        qty: qtyRounded,
+        unit: raw.unit,
+        amountInr: amountRounded,
+        reason: raw.reason?.trim() || undefined,
+      });
+    }
+
+    const totalInr = normalizedItems.reduce((sum, it) => sum + it.amountInr, 0);
+    const totalQty = normalizedItems.reduce((sum, it) => sum + it.qty, 0);
+    const firstItem = normalizedItems[0];
+    const itemSummary =
+      normalizedItems.length === 1
+        ? `${firstItem.itemName} (${firstItem.dimensions})`
+        : `${firstItem.itemName} + ${normalizedItems.length - 1} more`;
+
+    const resolvedIso =
+      dateIso && /^\d{4}-\d{2}-\d{2}$/.test(dateIso.trim())
+        ? dateIso.trim()
+        : parseDateLabelToIsoServer(dateLabel);
+    const formattedReturnNo = formatPurchaseReturnNoServer(returnNo, resolvedIso, dateLabel);
+
+    // 1. Automatically deduct returned items from matching Purchase Bills
+    const supplierKey = supplierName.trim().toLowerCase();
+    const branchKey = branchName.trim().toLowerCase();
+    const candidateBills = store.snapshot.purchaseBills
+      .filter((b) => b.supplierName.trim().toLowerCase() === supplierKey)
+      .sort((a, b) => {
+        if (purchaseBillId) {
+          if (a.id === purchaseBillId && b.id !== purchaseBillId) return -1;
+          if (b.id === purchaseBillId && a.id !== purchaseBillId) return 1;
+        }
+        const aBranch = a.branchName.trim().toLowerCase() === branchKey ? 1 : 0;
+        const bBranch = b.branchName.trim().toLowerCase() === branchKey ? 1 : 0;
+        return bBranch - aBranch;
+      });
+
+    const touchedBillIds = new Set<string>();
+    const affectedBillNos: string[] = [];
+
+    for (const line of normalizedItems) {
+      let remainingQty = line.qty;
+      let remainingAmt = line.amountInr;
+
+      // Pass A: Exact SKU / item name match across supplier purchase bills
+      for (const bill of candidateBills) {
+        if (remainingQty <= 0 && remainingAmt <= 0) break;
+        if (!Array.isArray(bill.items) || bill.items.length === 0) {
+          bill.items = [
+            {
+              id: `pbi-${bill.id}`,
+              itemCode: '',
+              itemName: bill.itemSummary,
+              dimensions: 'Standard',
+              qty: bill.qty,
+              unit: bill.unit,
+              amountInr: bill.totalInr,
+            },
+          ];
+        }
+        for (const bi of bill.items) {
+          if (remainingQty <= 0 && remainingAmt <= 0) break;
+          if (bi.qty <= 0 && bi.amountInr <= 0) continue;
+          const matchesCode =
+            bi.itemCode &&
+            bi.itemCode.trim().toLowerCase() === line.itemCode.trim().toLowerCase();
+          const matchesName =
+            bi.itemName &&
+            bi.itemName.trim().toLowerCase() === line.itemName.trim().toLowerCase();
+          if (!matchesCode && !matchesName) continue;
+
+          const deductQty = Math.min(bi.qty, remainingQty);
+          const deductAmt =
+            deductQty === bi.qty && remainingAmt >= bi.amountInr
+              ? bi.amountInr
+              : Math.min(bi.amountInr, Math.max(0, Math.round(remainingAmt)));
+
+          if (deductQty > 0 || deductAmt > 0) {
+            bi.qty = Math.max(0, bi.qty - deductQty);
+            bi.amountInr = Math.max(0, bi.amountInr - deductAmt);
+            remainingQty = Math.max(0, remainingQty - deductQty);
+            remainingAmt = Math.max(0, remainingAmt - deductAmt);
+            touchedBillIds.add(bill.id);
+            if (!affectedBillNos.includes(bill.billNo)) {
+              affectedBillNos.push(bill.billNo);
+            }
+          }
+        }
+      }
+
+      // Pass B: If return value/qty remains for that supplier (e.g., bill selected explicitly or legacy summary bill), reduce remaining open lines
+      if (remainingAmt > 0 || remainingQty > 0) {
+        for (const bill of candidateBills) {
+          if (remainingAmt <= 0 && remainingQty <= 0) break;
+          if (!Array.isArray(bill.items)) continue;
+          for (const bi of bill.items) {
+            if (remainingAmt <= 0 && remainingQty <= 0) break;
+            if (bi.qty <= 0 && bi.amountInr <= 0) continue;
+
+            const deductQty = Math.min(bi.qty, remainingQty);
+            const deductAmt = Math.min(bi.amountInr, Math.max(0, Math.round(remainingAmt)));
+            if (deductQty > 0 || deductAmt > 0) {
+              bi.qty = Math.max(0, bi.qty - deductQty);
+              bi.amountInr = Math.max(0, bi.amountInr - deductAmt);
+              remainingQty = Math.max(0, remainingQty - deductQty);
+              remainingAmt = Math.max(0, remainingAmt - deductAmt);
+              touchedBillIds.add(bill.id);
+              if (!affectedBillNos.includes(bill.billNo)) {
+                affectedBillNos.push(bill.billNo);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    for (const bill of store.snapshot.purchaseBills) {
+      if (!touchedBillIds.has(bill.id)) continue;
+      const lines = Array.isArray(bill.items) ? bill.items : [];
+      bill.qty = lines.reduce((sum, it) => sum + Math.max(0, Number(it.qty) || 0), 0);
+      bill.totalInr = lines.reduce((sum, it) => sum + Math.max(0, Number(it.amountInr) || 0), 0);
+      const activeLines = lines.filter((it) => it.qty > 0 || it.amountInr > 0);
+      if (activeLines.length === 0) {
+        bill.itemSummary = `Returned (${lines[0]?.itemName || 'All items'})`;
+      } else if (activeLines.length === 1) {
+        bill.itemSummary = `${activeLines[0].itemName} (${activeLines[0].dimensions})`;
+        bill.unit = activeLines[0].unit;
+      } else {
+        bill.itemSummary = `${activeLines[0].itemName} + ${activeLines.length - 1} more`;
+        bill.unit = activeLines[0].unit;
+      }
+    }
+
+    const explicitBill = purchaseBillId
+      ? store.snapshot.purchaseBills.find((b) => b.id === purchaseBillId)
+      : undefined;
+
+    const purchaseReturn: PurchaseReturn = {
+      id: `ret-${crypto.randomUUID().slice(0, 6)}`,
+      returnNo: formattedReturnNo,
+      supplierName: supplierName.trim(),
+      branchName: branchName.trim(),
+      purchaseBillId: explicitBill?.id,
+      purchaseBillNo: explicitBill?.billNo || affectedBillNos[0],
+      affectedBills: affectedBillNos,
+      reason: reason.trim(),
+      notes: notes?.trim() || undefined,
+      itemSummary,
+      qty: totalQty,
+      unit: firstItem.unit,
+      totalInr,
+      status: affectedBillNos.length > 0 ? 'Adjusted' : 'Completed',
+      dateLabel: dateLabel?.trim() || 'Today',
+      dateIso: resolvedIso,
+      items: normalizedItems,
+    };
+
+    store.snapshot.purchaseReturns = [purchaseReturn, ...(store.snapshot.purchaseReturns || [])];
+
+    // 2. Deduct returned quantities from Inventory / Slab stock & log history
+    for (const line of normalizedItems) {
+      const codeNorm = line.itemCode.trim().toLowerCase();
+      const item =
+        store.snapshot.varianceItems.find(
+          (i) =>
+            i.itemCode.toLowerCase() === codeNorm &&
+            i.locationName.trim().toLowerCase() === branchKey,
+        ) || store.snapshot.varianceItems.find((i) => i.itemCode.toLowerCase() === codeNorm);
+
+      if (item) {
+        item.systemQty = Math.max(0, item.systemQty - line.qty);
+        item.physicalQty = Math.max(0, item.physicalQty - line.qty);
+        recomputeItemMetrics(item);
+        item.lastCountedAt = 'Supplier return posted';
+
+        pushHistory({
+          itemId: item.id,
+          itemCode: item.itemCode,
+          type: 'Return',
+          referenceNo: purchaseReturn.returnNo,
+          quantityDelta: -line.qty,
+          unit: line.unit,
+          systemAfter: item.systemQty,
+          physicalAfter: item.physicalQty,
+          branchName: purchaseReturn.branchName,
+          partyOrNote: `${purchaseReturn.supplierName} · ${purchaseReturn.reason}${
+            affectedBillNos.length > 0 ? ` (Reduced ${affectedBillNos.join(', ')})` : ''
+          }`,
+          timestampLabel: 'Just now',
+        });
+      } else {
+        const slab =
+          store.snapshot.slabs.find(
+            (s) =>
+              s.lotNumber.toLowerCase() === codeNorm &&
+              s.branchName.trim().toLowerCase() === branchKey,
+          ) || store.snapshot.slabs.find((s) => s.lotNumber.toLowerCase() === codeNorm);
+
+        if (slab) {
+          const prevSqft = Math.max(0, slab.totalSqFt);
+          const avgAreaPerPiece =
+            slab.slabCountPcs > 0 && prevSqft > 0 ? prevSqft / slab.slabCountPcs : 50;
+          slab.systemSqFt = Math.max(
+            0,
+            Math.round((slab.systemSqFt ?? slab.totalSqFt) - line.qty),
+          );
+          slab.totalSqFt = Math.max(0, Math.round(slab.totalSqFt - line.qty));
+          slab.slabCountPcs =
+            slab.totalSqFt === 0
+              ? 0
+              : Math.max(1, Math.round(slab.totalSqFt / Math.max(1, avgAreaPerPiece)));
+          slab.status = slab.totalSqFt > 0 ? 'In Stock' : 'Out of Stock';
+
+          pushHistory({
+            itemId: slab.id,
+            itemCode: slab.lotNumber,
+            type: 'Return',
+            referenceNo: purchaseReturn.returnNo,
+            quantityDelta: -line.qty,
+            unit: line.unit,
+            systemAfter: slab.systemSqFt,
+            physicalAfter: slab.totalSqFt,
+            branchName: purchaseReturn.branchName,
+            partyOrNote: `${purchaseReturn.supplierName} · ${purchaseReturn.reason}${
+              affectedBillNos.length > 0 ? ` (Reduced ${affectedBillNos.join(', ')})` : ''
+            }`,
+            timestampLabel: 'Just now',
+          });
+        }
+      }
+    }
+
+    syncSuppliersFromPurchaseBills(store.snapshot);
+    syncLocationsFromLedger(store.snapshot);
+    store.snapshot.lastUpdatedAt = new Date().toISOString();
+    saveStore();
+    broadcastSnapshot();
+    res.status(201).json({purchaseReturn, snapshot: store.snapshot});
   });
 
   app.post('/api/inventory/sales-bills', requireAuth, (req: Request, res: Response) => {

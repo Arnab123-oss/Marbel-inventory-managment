@@ -13,6 +13,7 @@ import {
   RotateCcw,
   Search,
   Trash2,
+  Undo2,
   Upload,
   X,
 } from 'lucide-react';
@@ -28,6 +29,7 @@ import type {
   LocationRow,
   NavSection,
   PurchaseBill,
+  PurchaseReturn,
   SalesBill,
   SalesPaymentStatus,
   SlabLot,
@@ -45,7 +47,7 @@ import {
 import {RowActionMenu} from '../ui/RowActionMenu';
 import {LocationTableWidget} from '../widgets/LocationTableWidget';
 import {ReportsAnalyticsView} from './ReportsAnalyticsView';
-import {computeAllBranches, estimateSlabRateInr, formatInrCompact} from '../../utils/branchMetrics';
+import {computeAllBranches, estimateSlabRateInr} from '../../utils/branchMetrics';
 
 interface SecondaryViewsProps {
   section: Exclude<NavSection, 'dashboard'>;
@@ -142,6 +144,23 @@ interface SecondaryViewsProps {
       }>;
     },
   ) => Promise<PurchaseBill>;
+  onCreatePurchaseReturn: (payload: {
+    returnNo: string;
+    supplierName: string;
+    branchName: string;
+    purchaseBillId?: string;
+    reason: string;
+    notes?: string;
+    dateLabel: string;
+    dateIso?: string;
+    items: Array<{
+      itemCode: string;
+      qty: number;
+      unit: UnitType;
+      amountInr: number;
+      reason?: string;
+    }>;
+  }) => Promise<void>;
   onCreateSalesBill: (payload: {
     invoiceNo: string;
     customerName: string;
@@ -360,6 +379,47 @@ interface PurchaseBillDraftItem {
   amountInr: string;
 }
 
+interface PurchaseReturnDraftItem {
+  id: string;
+  itemCode: string;
+  qty: string;
+  unit: UnitType;
+  amountInr: string;
+  reason: string;
+}
+
+const RETURN_REASONS = [
+  'Damaged in Transit',
+  'Crack / Edge Chipping',
+  'Size / Shade Mismatch',
+  'Excess Quantity Supplied',
+  'Quality / Polish Defect',
+  'Other',
+];
+
+function getReturnNoPrefixFromIso(isoDate: string): string {
+  const parts = isoDate.split('-');
+  if (parts.length === 3 && parts[0].length === 4 && parts[1].length === 2) {
+    return `RET-${parts[1]}-${parts[0]}-`;
+  }
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  return `RET-${month}-${now.getFullYear()}-`;
+}
+
+function extractReturnNoSuffix(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^RET-\d{2}-\d{4}-/i, '')
+    .replace(/^RET-/i, '')
+    .trim();
+}
+
+function buildFormattedReturnNo(rawInput: string, isoDate: string): string {
+  const suffix = extractReturnNoSuffix(rawInput);
+  return `${getReturnNoPrefixFromIso(isoDate)}${suffix}`;
+}
+
 interface SalesBillDraftItem {
   id: string;
   itemCode: string;
@@ -430,6 +490,7 @@ export function SecondaryViews({
   onDeleteSlabLot,
   onCreatePurchaseBill,
   onUpdatePurchaseBill,
+  onCreatePurchaseReturn,
   onCreateSalesBill,
   onUpdateSalesBill,
   onCreateTransfer,
@@ -599,6 +660,11 @@ export function SecondaryViews({
   const [editPbItems, setEditPbItems] = useState<PurchaseBillDraftItem[]>([]);
   const [editPbError, setEditPbError] = useState<string | null>(null);
   const [savingEditBill, setSavingEditBill] = useState(false);
+  const [pbSearch, setPbSearch] = useState('');
+  const [pbDateFrom, setPbDateFrom] = useState('');
+  const [pbDateTo, setPbDateTo] = useState('');
+  const [pbLocationFilter, setPbLocationFilter] = useState('All');
+  const [pbStatusFilter, setPbStatusFilter] = useState<'All' | PurchaseBill['status']>('All');
 
   const startEditPurchaseBill = (bill: PurchaseBill) => {
     const iso = parseDateLabelToIso(bill.dateLabel, bill.dateIso);
@@ -681,6 +747,11 @@ export function SecondaryViews({
   const [editSbItems, setEditSbItems] = useState<SalesBillDraftItem[]>([]);
   const [editSbError, setEditSbError] = useState<string | null>(null);
   const [savingEditSalesBill, setSavingEditSalesBill] = useState(false);
+  const [sbSearch, setSbSearch] = useState('');
+  const [sbDateFrom, setSbDateFrom] = useState('');
+  const [sbDateTo, setSbDateTo] = useState('');
+  const [sbLocationFilter, setSbLocationFilter] = useState('All');
+  const [sbStatusFilter, setSbStatusFilter] = useState<'All' | SalesPaymentStatus>('All');
 
   const startEditSalesBill = (bill: SalesBill) => {
     const iso = parseDateLabelToIso(bill.dateLabel, bill.dateIso);
@@ -727,6 +798,46 @@ export function SecondaryViews({
     setEditSbError(null);
     setIsEditingSalesBill(true);
   };
+
+  // Purchase Return state
+  const createDefaultReturnItem = (index = 0): PurchaseReturnDraftItem => {
+    const pick =
+      billableOptions[index % Math.max(1, billableOptions.length)] || billableOptions[0];
+    const defaultQty = 50;
+    const defaultUnit: UnitType = pick?.unit || 'sq. ft';
+    const defaultAmount = defaultQty * (pick?.unitPriceInr || 450);
+    return {
+      id: `ret-draft-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      itemCode: pick?.itemCode || 'SL-001',
+      qty: String(defaultQty),
+      unit: defaultUnit,
+      amountInr: String(defaultAmount),
+      reason: '',
+    };
+  };
+
+  const [retNo, setRetNo] = useState(() =>
+    String(2101 + (snapshot.purchaseReturns?.length || 0)),
+  );
+  const [retSupplier, setRetSupplier] = useState(
+    snapshot.suppliers[0]?.name || 'Kishangarh Marble Depot',
+  );
+  const [retBranch, setRetBranch] = useState(snapshot.locations[0]?.name || 'Main Showroom');
+  const [retPurchaseBillId, setRetPurchaseBillId] = useState('');
+  const [retDate, setRetDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [retReason, setRetReason] = useState<string>(RETURN_REASONS[0]);
+  const [retNotes, setRetNotes] = useState('');
+  const [retItems, setRetItems] = useState<PurchaseReturnDraftItem[]>(() => [
+    createDefaultReturnItem(0),
+  ]);
+  const [retError, setRetError] = useState<string | null>(null);
+  const [savingReturn, setSavingReturn] = useState(false);
+  const [viewReturn, setViewReturn] = useState<PurchaseReturn | null>(null);
+  const [retSearch, setRetSearch] = useState('');
+  const [retDateFrom, setRetDateFrom] = useState('');
+  const [retDateTo, setRetDateTo] = useState('');
+  const [retLocationFilter, setRetLocationFilter] = useState('All');
+  const [retSupplierFilter, setRetSupplierFilter] = useState('All');
 
   // Transfer state
   const [transferItem, setTransferItem] = useState(
@@ -2414,74 +2525,241 @@ export function SecondaryViews({
             </button>
           </form>
 
-          <div className="lg:col-span-2 bg-white border border-[#E5E9F0] rounded-xl p-5">
-            <h2 className="text-[14px] font-semibold text-[#0F172A] mb-3">
-              Purchase Bills ({snapshot.purchaseBills.length})
-            </h2>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse min-w-[680px]">
-                <thead>
-                  <tr className="border-b border-[#E5E9F0] text-[11px] font-medium text-[#64748B]">
-                    <th className="py-2 pr-2">Bill No</th>
-                    <th className="py-2 px-2">Date</th>
-                    <th className="py-2 px-2">Supplier</th>
-                    <th className="py-2 px-2">Location</th>
-                    <th className="py-2 px-2 text-right">Amount</th>
-                    <th className="py-2 px-2 text-right">Status</th>
-                    <th className="py-2 pl-2 text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#F1F5F9] text-[12px]">
-                  {snapshot.purchaseBills.map((b) => {
-                    const totalAmt = getPurchaseBillTotal(b);
-                    return (
-                      <tr key={b.id} className="hover:bg-slate-50/80">
-                        <td className="py-2.5 pr-2 font-mono font-medium whitespace-nowrap">
-                          {getDisplayBillNo(b)}
-                        </td>
-                        <td className="py-2.5 px-2 text-[#64748B] whitespace-nowrap">
-                          {b.dateLabel}
-                        </td>
-                        <td className="py-2.5 px-2 text-[#0F172A] font-medium">
-                          {b.supplierName}
-                        </td>
-                        <td className="py-2.5 px-2 text-[#475569] whitespace-nowrap">
-                          {b.branchName}
-                        </td>
-                        <td className="py-2.5 px-2 text-right font-semibold tabular-nums whitespace-nowrap">
-                          ₹ {totalAmt.toLocaleString('en-IN')}
-                        </td>
-                        <td
-                          className={`py-2.5 px-2 text-right font-medium whitespace-nowrap ${
-                            b.status === 'Paid'
-                              ? 'text-[#16A34A]'
-                              : b.status === 'Pending'
-                                ? 'text-[#DC2626]'
-                                : 'text-[#D97706]'
-                          }`}
+          <div className="lg:col-span-2 bg-white border border-[#E5E9F0] rounded-xl p-5 space-y-3.5">
+            {(() => {
+              const pbLocationOptions = Array.from(
+                new Set([
+                  ...snapshot.locations.map((l) => l.name),
+                  ...snapshot.purchaseBills.map((b) => b.branchName),
+                ]),
+              ).filter(Boolean);
+
+              const q = pbSearch.trim().toLowerCase();
+              const filteredPurchaseBills = snapshot.purchaseBills.filter((b) => {
+                if (pbLocationFilter !== 'All' && b.branchName !== pbLocationFilter) {
+                  return false;
+                }
+                if (pbStatusFilter !== 'All' && b.status !== pbStatusFilter) {
+                  return false;
+                }
+                const iso = parseDateLabelToIso(b.dateLabel, b.dateIso);
+                if (pbDateFrom && iso < pbDateFrom) return false;
+                if (pbDateTo && iso > pbDateTo) return false;
+                if (q) {
+                  const displayNo = getDisplayBillNo(b).toLowerCase();
+                  const matchesText =
+                    displayNo.includes(q) ||
+                    b.billNo.toLowerCase().includes(q) ||
+                    b.supplierName.toLowerCase().includes(q) ||
+                    b.branchName.toLowerCase().includes(q) ||
+                    b.dateLabel.toLowerCase().includes(q);
+                  if (!matchesText) return false;
+                }
+                return true;
+              });
+
+              const hasPbFilters =
+                Boolean(pbSearch.trim()) ||
+                Boolean(pbDateFrom) ||
+                Boolean(pbDateTo) ||
+                pbLocationFilter !== 'All' ||
+                pbStatusFilter !== 'All';
+
+              const filteredTotalAmt = filteredPurchaseBills.reduce(
+                (sum, b) => sum + getPurchaseBillTotal(b),
+                0,
+              );
+
+              return (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h2 className="text-[14px] font-semibold text-[#0F172A]">
+                      Purchase Bills (
+                      {hasPbFilters
+                        ? `${filteredPurchaseBills.length} of ${snapshot.purchaseBills.length}`
+                        : snapshot.purchaseBills.length}
+                      )
+                    </h2>
+                    <div className="flex items-center gap-3">
+                      <span className="text-[12px] text-[#64748B] tabular-nums">
+                        Total:{' '}
+                        <strong className="text-[#0F172A]">
+                          ₹ {filteredTotalAmt.toLocaleString('en-IN')}
+                        </strong>
+                      </span>
+                      {hasPbFilters && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPbSearch('');
+                            setPbDateFrom('');
+                            setPbDateTo('');
+                            setPbLocationFilter('All');
+                            setPbStatusFilter('All');
+                          }}
+                          className="h-7 px-2.5 rounded-lg border border-[#E2E8F0] bg-[#FAFBFD] hover:bg-slate-100 text-[11.5px] font-medium text-[#475569] inline-flex items-center gap-1 transition-colors"
                         >
-                          {b.status}
-                        </td>
-                        <td className="py-2.5 pl-2 text-right whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setIsEditingBill(false);
-                              setEditPbError(null);
-                              setViewPurchaseBill(b);
-                            }}
-                            className="h-7 px-2.5 rounded-lg border border-[#E2E8F0] bg-white hover:bg-[#EEF4FF] hover:border-blue-200 hover:text-[#1D63ED] text-[#334155] text-[11.5px] font-medium inline-flex items-center gap-1.5 transition-colors"
-                          >
-                            <Eye className="w-3.5 h-3.5" />
-                            <span>View Bill</span>
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                          <RotateCcw className="w-3 h-3" />
+                          <span>Reset</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Column Filters: Search, Date Range, Location, Status */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-12 gap-2.5 p-3 rounded-lg bg-[#FAFBFD] border border-[#EBF0F6]">
+                    <div className="xl:col-span-4 relative">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Bill No / Supplier
+                      </label>
+                      <div className="relative">
+                        <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          type="text"
+                          value={pbSearch}
+                          onChange={(e) => setPbSearch(e.target.value)}
+                          placeholder="Search bill no or supplier..."
+                          className="w-full h-8.5 pl-8 pr-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="xl:col-span-4">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Date Range
+                      </label>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <input
+                          type="date"
+                          aria-label="Purchase bill date from"
+                          value={pbDateFrom}
+                          onChange={(e) => setPbDateFrom(e.target.value)}
+                          className="w-full h-8.5 px-2 text-[11.5px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums focus:outline-none focus:border-blue-500"
+                        />
+                        <input
+                          type="date"
+                          aria-label="Purchase bill date to"
+                          value={pbDateTo}
+                          onChange={(e) => setPbDateTo(e.target.value)}
+                          className="w-full h-8.5 px-2 text-[11.5px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="xl:col-span-2">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Location
+                      </label>
+                      <select
+                        aria-label="Filter purchase bills by location"
+                        value={pbLocationFilter}
+                        onChange={(e) => setPbLocationFilter(e.target.value)}
+                        className="w-full h-8.5 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white text-[#0F172A] focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="All">All Locations</option>
+                        {pbLocationOptions.map((locName) => (
+                          <option key={locName} value={locName}>
+                            {locName}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="xl:col-span-2">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Status
+                      </label>
+                      <select
+                        aria-label="Filter purchase bills by status"
+                        value={pbStatusFilter}
+                        onChange={(e) =>
+                          setPbStatusFilter(e.target.value as 'All' | PurchaseBill['status'])
+                        }
+                        className="w-full h-8.5 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white text-[#0F172A] focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="All">All Status</option>
+                        <option value="Paid">Paid</option>
+                        <option value="Pending">Pending</option>
+                        <option value="Partial">Partial</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse min-w-[680px]">
+                      <thead>
+                        <tr className="border-b border-[#E5E9F0] text-[11px] font-medium text-[#64748B]">
+                          <th className="py-2 pr-2">Bill No</th>
+                          <th className="py-2 px-2">Date</th>
+                          <th className="py-2 px-2">Supplier</th>
+                          <th className="py-2 px-2">Location</th>
+                          <th className="py-2 px-2 text-right">Amount</th>
+                          <th className="py-2 px-2 text-right">Status</th>
+                          <th className="py-2 pl-2 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#F1F5F9] text-[12px]">
+                        {filteredPurchaseBills.length === 0 ? (
+                          <tr>
+                            <td colSpan={7} className="py-8 text-center text-[#64748B]">
+                              No purchase bills match the selected filters.
+                            </td>
+                          </tr>
+                        ) : (
+                          filteredPurchaseBills.map((b) => {
+                            const totalAmt = getPurchaseBillTotal(b);
+                            return (
+                              <tr key={b.id} className="hover:bg-slate-50/80">
+                                <td className="py-2.5 pr-2 font-mono font-medium whitespace-nowrap">
+                                  {getDisplayBillNo(b)}
+                                </td>
+                                <td className="py-2.5 px-2 text-[#64748B] whitespace-nowrap">
+                                  {b.dateLabel}
+                                </td>
+                                <td className="py-2.5 px-2 text-[#0F172A] font-medium">
+                                  {b.supplierName}
+                                </td>
+                                <td className="py-2.5 px-2 text-[#475569] whitespace-nowrap">
+                                  {b.branchName}
+                                </td>
+                                <td className="py-2.5 px-2 text-right font-semibold tabular-nums whitespace-nowrap">
+                                  ₹ {totalAmt.toLocaleString('en-IN')}
+                                </td>
+                                <td
+                                  className={`py-2.5 px-2 text-right font-medium whitespace-nowrap ${
+                                    b.status === 'Paid'
+                                      ? 'text-[#16A34A]'
+                                      : b.status === 'Pending'
+                                        ? 'text-[#DC2626]'
+                                        : 'text-[#D97706]'
+                                  }`}
+                                >
+                                  {b.status}
+                                </td>
+                                <td className="py-2.5 pl-2 text-right whitespace-nowrap">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setIsEditingBill(false);
+                                      setEditPbError(null);
+                                      setViewPurchaseBill(b);
+                                    }}
+                                    className="h-7 px-2.5 rounded-lg border border-[#E2E8F0] bg-white hover:bg-[#EEF4FF] hover:border-blue-200 hover:text-[#1D63ED] text-[#334155] text-[11.5px] font-medium inline-flex items-center gap-1.5 transition-colors"
+                                  >
+                                    <Eye className="w-3.5 h-3.5" />
+                                    <span>View Bill</span>
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       </div>
@@ -2902,78 +3180,251 @@ export function SecondaryViews({
             </button>
           </form>
 
-          <div className="lg:col-span-2 bg-white border border-[#E5E9F0] rounded-xl p-5">
-            <h2 className="text-[14px] font-semibold text-[#0F172A] mb-3">
-              Recent Sales Invoices ({snapshot.salesBills.length})
-            </h2>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse min-w-[680px]">
-                <thead>
-                  <tr className="border-b border-[#E5E9F0] text-[11px] font-medium text-[#64748B]">
-                    <th className="py-2 pr-2">Invoice</th>
-                    <th className="py-2 px-2">Date</th>
-                    <th className="py-2 px-2">Customer</th>
-                    <th className="py-2 px-2">Location</th>
-                    <th className="py-2 px-2 text-right">Amount</th>
-                    <th className="py-2 px-2 text-right">Status</th>
-                    <th className="py-2 pl-2 text-right">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#F1F5F9] text-[12px]">
-                  {snapshot.salesBills.map((b) => {
-                    const totalAmt = getSalesBillTotal(b);
-                    const computedStatus = getSalesBillComputedStatus(b);
-                    return (
-                      <tr key={b.id} className="hover:bg-slate-50/80">
-                        <td className="py-2.5 pr-2 font-mono font-medium whitespace-nowrap">
-                          {formatInvoiceNo(b.invoiceNo)}
-                        </td>
-                        <td className="py-2.5 px-2 text-[#64748B] whitespace-nowrap">
-                          {b.dateLabel}
-                        </td>
-                        <td className="py-2.5 px-2">
-                          <div className="text-[#0F172A] font-medium">{b.customerName}</div>
-                          {b.customerPhone && (
-                            <div className="text-[11px] text-[#64748B]">{b.customerPhone}</div>
-                          )}
-                        </td>
-                        <td className="py-2.5 px-2 text-[#475569] whitespace-nowrap">
-                          {b.branchName}
-                        </td>
-                        <td className="py-2.5 px-2 text-right font-semibold tabular-nums whitespace-nowrap">
-                          ₹ {totalAmt.toLocaleString('en-IN')}
-                        </td>
-                        <td
-                          className={`py-2.5 px-2 text-right font-medium whitespace-nowrap ${
-                            computedStatus === 'Paid'
-                              ? 'text-[#16A34A]'
-                              : computedStatus === 'Due'
-                                ? 'text-[#DC2626]'
-                                : 'text-[#D97706]'
-                          }`}
+          <div className="lg:col-span-2 bg-white border border-[#E5E9F0] rounded-xl p-5 space-y-3.5">
+            {(() => {
+              const sbLocationOptions = Array.from(
+                new Set([
+                  ...snapshot.locations.map((l) => l.name),
+                  ...snapshot.salesBills.map((b) => b.branchName),
+                ]),
+              ).filter(Boolean);
+
+              const q = sbSearch.trim().toLowerCase();
+              const filteredSalesBills = snapshot.salesBills.filter((b) => {
+                if (sbLocationFilter !== 'All' && b.branchName !== sbLocationFilter) {
+                  return false;
+                }
+                const computedStatus = getSalesBillComputedStatus(b);
+                if (sbStatusFilter !== 'All' && computedStatus !== sbStatusFilter) {
+                  return false;
+                }
+                const iso = parseDateLabelToIso(b.dateLabel, b.dateIso);
+                if (sbDateFrom && iso < sbDateFrom) return false;
+                if (sbDateTo && iso > sbDateTo) return false;
+                if (q) {
+                  const inv = formatInvoiceNo(b.invoiceNo).toLowerCase();
+                  const matchesText =
+                    inv.includes(q) ||
+                    b.invoiceNo.toLowerCase().includes(q) ||
+                    b.customerName.toLowerCase().includes(q) ||
+                    (b.customerPhone || '').toLowerCase().includes(q) ||
+                    b.branchName.toLowerCase().includes(q) ||
+                    b.dateLabel.toLowerCase().includes(q);
+                  if (!matchesText) return false;
+                }
+                return true;
+              });
+
+              const hasSbFilters =
+                Boolean(sbSearch.trim()) ||
+                Boolean(sbDateFrom) ||
+                Boolean(sbDateTo) ||
+                sbLocationFilter !== 'All' ||
+                sbStatusFilter !== 'All';
+
+              const filteredTotalAmt = filteredSalesBills.reduce(
+                (sum, b) => sum + getSalesBillTotal(b),
+                0,
+              );
+
+              return (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h2 className="text-[14px] font-semibold text-[#0F172A]">
+                      Recent Sales Invoices (
+                      {hasSbFilters
+                        ? `${filteredSalesBills.length} of ${snapshot.salesBills.length}`
+                        : snapshot.salesBills.length}
+                      )
+                    </h2>
+                    <div className="flex items-center gap-3">
+                      <span className="text-[12px] text-[#64748B] tabular-nums">
+                        Total:{' '}
+                        <strong className="text-[#0F172A]">
+                          ₹ {filteredTotalAmt.toLocaleString('en-IN')}
+                        </strong>
+                      </span>
+                      {hasSbFilters && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSbSearch('');
+                            setSbDateFrom('');
+                            setSbDateTo('');
+                            setSbLocationFilter('All');
+                            setSbStatusFilter('All');
+                          }}
+                          className="h-7 px-2.5 rounded-lg border border-[#E2E8F0] bg-[#FAFBFD] hover:bg-slate-100 text-[11.5px] font-medium text-[#475569] inline-flex items-center gap-1 transition-colors"
                         >
-                          {computedStatus}
-                        </td>
-                        <td className="py-2.5 pl-2 text-right whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setIsEditingSalesBill(false);
-                              setEditSbError(null);
-                              setViewSalesBill(b);
-                            }}
-                            className="h-7 px-2.5 rounded-lg border border-[#E2E8F0] bg-white hover:bg-[#EEF4FF] hover:border-blue-200 hover:text-[#1D63ED] text-[#334155] text-[11.5px] font-medium inline-flex items-center gap-1.5 transition-colors"
-                          >
-                            <Eye className="w-3.5 h-3.5" />
-                            <span>View Bill</span>
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                          <RotateCcw className="w-3 h-3" />
+                          <span>Reset</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Column Filters: Search, Date Range, Location, Status */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-12 gap-2.5 p-3 rounded-lg bg-[#FAFBFD] border border-[#EBF0F6]">
+                    <div className="xl:col-span-4 relative">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Invoice / Customer
+                      </label>
+                      <div className="relative">
+                        <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          type="text"
+                          value={sbSearch}
+                          onChange={(e) => setSbSearch(e.target.value)}
+                          placeholder="Search invoice, customer, phone..."
+                          className="w-full h-8.5 pl-8 pr-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="xl:col-span-4">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Date Range
+                      </label>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <input
+                          type="date"
+                          aria-label="Sales invoice date from"
+                          value={sbDateFrom}
+                          onChange={(e) => setSbDateFrom(e.target.value)}
+                          className="w-full h-8.5 px-2 text-[11.5px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums focus:outline-none focus:border-blue-500"
+                        />
+                        <input
+                          type="date"
+                          aria-label="Sales invoice date to"
+                          value={sbDateTo}
+                          onChange={(e) => setSbDateTo(e.target.value)}
+                          className="w-full h-8.5 px-2 text-[11.5px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="xl:col-span-2">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Location
+                      </label>
+                      <select
+                        aria-label="Filter sales invoices by location"
+                        value={sbLocationFilter}
+                        onChange={(e) => setSbLocationFilter(e.target.value)}
+                        className="w-full h-8.5 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white text-[#0F172A] focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="All">All Locations</option>
+                        {sbLocationOptions.map((locName) => (
+                          <option key={locName} value={locName}>
+                            {locName}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="xl:col-span-2">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Status
+                      </label>
+                      <select
+                        aria-label="Filter sales invoices by status"
+                        value={sbStatusFilter}
+                        onChange={(e) =>
+                          setSbStatusFilter(e.target.value as 'All' | SalesPaymentStatus)
+                        }
+                        className="w-full h-8.5 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white text-[#0F172A] focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="All">All Status</option>
+                        <option value="Paid">Paid</option>
+                        <option value="Partially Paid">Partially Paid</option>
+                        <option value="Due">Due</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse min-w-[680px]">
+                      <thead>
+                        <tr className="border-b border-[#E5E9F0] text-[11px] font-medium text-[#64748B]">
+                          <th className="py-2 pr-2">Invoice</th>
+                          <th className="py-2 px-2">Date</th>
+                          <th className="py-2 px-2">Customer</th>
+                          <th className="py-2 px-2">Location</th>
+                          <th className="py-2 px-2 text-right">Amount</th>
+                          <th className="py-2 px-2 text-right">Status</th>
+                          <th className="py-2 pl-2 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#F1F5F9] text-[12px]">
+                        {filteredSalesBills.length === 0 ? (
+                          <tr>
+                            <td colSpan={7} className="py-8 text-center text-[#64748B]">
+                              No sales invoices match the selected filters.
+                            </td>
+                          </tr>
+                        ) : (
+                          filteredSalesBills.map((b) => {
+                            const totalAmt = getSalesBillTotal(b);
+                            const computedStatus = getSalesBillComputedStatus(b);
+                            return (
+                              <tr key={b.id} className="hover:bg-slate-50/80">
+                                <td className="py-2.5 pr-2 font-mono font-medium whitespace-nowrap">
+                                  {formatInvoiceNo(b.invoiceNo)}
+                                </td>
+                                <td className="py-2.5 px-2 text-[#64748B] whitespace-nowrap">
+                                  {b.dateLabel}
+                                </td>
+                                <td className="py-2.5 px-2">
+                                  <div className="text-[#0F172A] font-medium">
+                                    {b.customerName}
+                                  </div>
+                                  {b.customerPhone && (
+                                    <div className="text-[11px] text-[#64748B]">
+                                      {b.customerPhone}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="py-2.5 px-2 text-[#475569] whitespace-nowrap">
+                                  {b.branchName}
+                                </td>
+                                <td className="py-2.5 px-2 text-right font-semibold tabular-nums whitespace-nowrap">
+                                  ₹ {totalAmt.toLocaleString('en-IN')}
+                                </td>
+                                <td
+                                  className={`py-2.5 px-2 text-right font-medium whitespace-nowrap ${
+                                    computedStatus === 'Paid'
+                                      ? 'text-[#16A34A]'
+                                      : computedStatus === 'Due'
+                                        ? 'text-[#DC2626]'
+                                        : 'text-[#D97706]'
+                                  }`}
+                                >
+                                  {computedStatus}
+                                </td>
+                                <td className="py-2.5 pl-2 text-right whitespace-nowrap">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setIsEditingSalesBill(false);
+                                      setEditSbError(null);
+                                      setViewSalesBill(b);
+                                    }}
+                                    className="h-7 px-2.5 rounded-lg border border-[#E2E8F0] bg-white hover:bg-[#EEF4FF] hover:border-blue-200 hover:text-[#1D63ED] text-[#334155] text-[11.5px] font-medium inline-flex items-center gap-1.5 transition-colors"
+                                  >
+                                    <Eye className="w-3.5 h-3.5" />
+                                    <span>View Bill</span>
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       </div>
@@ -3511,68 +3962,725 @@ export function SecondaryViews({
             onViewLocation={onSelectLocation}
           />
         </div>
+      </div>
+    );
+  }
 
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {branchBreakdowns.map((entry) => {
-            const loc = entry.location;
-            return (
-              <div
-                key={loc.id}
-                className="bg-white border border-[#E5E9F0] rounded-xl p-5 flex flex-col justify-between gap-4"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="text-[11px] font-medium text-[#64748B]">
-                      {loc.type} · {formatInrCompact(entry.net.valueInr)}
-                    </div>
-                    <h3 className="text-[16px] font-bold text-[#0F172A] mt-0.5">{loc.name}</h3>
-                  </div>
-                  <span className="text-[14px] font-bold text-[#16A34A] tabular-nums">
-                    {loc.inventoryAccuracyPct.toFixed(2)}%
+  if (section === 'returns') {
+    const allReturns = snapshot.purchaseReturns || [];
+    const supplierBills = snapshot.purchaseBills.filter(
+      (b) => b.supplierName.trim().toLowerCase() === retSupplier.trim().toLowerCase(),
+    );
+    const selectedRefBill = retPurchaseBillId
+      ? supplierBills.find((b) => b.id === retPurchaseBillId)
+      : undefined;
+    const retCalculatedTotal = retItems.reduce(
+      (sum, row) => sum + Math.max(0, Number(row.amountInr) || 0),
+      0,
+    );
+
+    const updateRetItem = (
+      id: string,
+      updater: (row: PurchaseReturnDraftItem) => PurchaseReturnDraftItem,
+    ) => {
+      setRetItems((prev) => prev.map((row) => (row.id === id ? updater(row) : row)));
+    };
+
+    const loadItemsFromBill = (bill: PurchaseBill) => {
+      const sourceLines =
+        Array.isArray(bill.items) && bill.items.length > 0
+          ? bill.items.filter((it) => it.qty > 0 || it.amountInr > 0)
+          : [];
+      if (sourceLines.length === 0) return;
+      const mapped: PurchaseReturnDraftItem[] = sourceLines.map((it, idx) => {
+        const matched =
+          (it.itemCode && findBillableByCode(it.itemCode)) ||
+          billableOptions.find(
+            (v) => v.itemName.toLowerCase() === it.itemName.toLowerCase(),
+          ) ||
+          billableOptions[0];
+        return {
+          id: `ret-load-${Date.now()}-${idx}`,
+          itemCode: matched?.itemCode || it.itemCode || 'SL-001',
+          qty: String(it.qty),
+          unit: it.unit,
+          amountInr: String(it.amountInr),
+          reason: '',
+        };
+      });
+      setRetItems(mapped);
+      if (bill.branchName) {
+        setRetBranch(bill.branchName);
+      }
+    };
+
+    return (
+      <div className="space-y-5">
+        <div>
+          <h1 className="text-[20px] font-bold text-[#0F172A]">Supplier Purchase Returns</h1>
+          <p className="text-[13px] text-[#64748B]">
+            Return damaged, mismatched, or excess marble &amp; tiles to suppliers. Every return automatically reduces matching Purchase Bills, Supplier payables, Branch stock, and Dashboard KPIs.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              setRetError(null);
+              if (!retNo.trim()) {
+                setRetError('Please enter a Return No.');
+                return;
+              }
+              if (!retSupplier.trim() || !retBranch.trim()) {
+                setRetError('Supplier and Branch are required.');
+                return;
+              }
+              if (retReason === 'Other' && !retNotes.trim()) {
+                setRetError('Please enter return reason details in Notes.');
+                return;
+              }
+              if (retItems.length === 0) {
+                setRetError('Add at least one product item to record a return.');
+                return;
+              }
+              const parsedItems = retItems.map((row) => ({
+                itemCode: row.itemCode,
+                qty: Number(row.qty),
+                unit: row.unit,
+                amountInr: Number(row.amountInr),
+                reason: row.reason.trim() || undefined,
+              }));
+              if (
+                parsedItems.some(
+                  (it) => !it.itemCode || !it.qty || it.qty <= 0 || it.amountInr < 0,
+                )
+              ) {
+                setRetError(
+                  'Every returned item card must have a product, positive qty, and valid amount.',
+                );
+                return;
+              }
+              setSavingReturn(true);
+              try {
+                await onCreatePurchaseReturn({
+                  returnNo: buildFormattedReturnNo(retNo, retDate),
+                  supplierName: retSupplier,
+                  branchName: retBranch,
+                  purchaseBillId: retPurchaseBillId || undefined,
+                  reason: retReason,
+                  notes: retNotes.trim() || undefined,
+                  dateLabel: formatIsoDateToLabel(retDate),
+                  dateIso: retDate,
+                  items: parsedItems,
+                });
+                const numericSuffix = Number(extractReturnNoSuffix(retNo));
+                if (!Number.isNaN(numericSuffix) && Number.isFinite(numericSuffix)) {
+                  setRetNo(String(numericSuffix + 1));
+                } else {
+                  setRetNo('');
+                }
+                setRetPurchaseBillId('');
+                setRetNotes('');
+                setRetItems([createDefaultReturnItem(0)]);
+              } catch (err) {
+                setRetError(
+                  err instanceof Error ? err.message : 'Unable to record supplier return.',
+                );
+              } finally {
+                setSavingReturn(false);
+              }
+            }}
+            className="bg-white border border-[#E5E9F0] rounded-xl p-5 space-y-3.5 h-fit"
+          >
+            <h2 className="text-[14px] font-semibold text-[#0F172A] flex items-center gap-2">
+              <Undo2 className="w-4 h-4 text-[#2563EB]" />
+              <span>Record Supplier Return</span>
+            </h2>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                  Return No
+                </label>
+                <div className="flex items-stretch rounded-lg border border-[#E2E8F0] overflow-hidden focus-within:border-blue-500 bg-white">
+                  <span className="px-2 inline-flex items-center bg-[#F8FAFC] border-r border-[#E2E8F0] text-[11px] font-mono font-semibold text-[#2563EB] select-none whitespace-nowrap">
+                    {getReturnNoPrefixFromIso(retDate)}
                   </span>
+                  <input
+                    type="text"
+                    value={retNo}
+                    onChange={(e) => setRetNo(e.target.value)}
+                    placeholder="2101"
+                    className="w-full h-9 px-2 text-[12.5px] font-mono text-[#0F172A] focus:outline-none"
+                    required
+                  />
                 </div>
-
-                <div className="grid grid-cols-3 gap-2 pt-3 border-t border-[#F1F5F9] text-[12px]">
-                  <div>
-                    <div className="text-[#64748B] text-[11px]">Slabs</div>
-                    <div className="font-semibold text-[#0F172A] tabular-nums mt-0.5">
-                      {loc.sqftQty.toLocaleString('en-IN')} sq. ft
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-[#64748B] text-[11px]">Pieces</div>
-                    <div className="font-semibold text-[#0F172A] tabular-nums mt-0.5">
-                      {loc.pcsQty.toLocaleString('en-IN')} pcs
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-[#64748B] text-[11px]">Boxes</div>
-                    <div className="font-semibold text-[#0F172A] tabular-nums mt-0.5">
-                      {loc.boxQty.toLocaleString('en-IN')} box
-                    </div>
-                  </div>
-                </div>
-
-                <div className="text-[11px] text-[#64748B] flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                  <span>{entry.sources.products.count} products</span>
-                  <span>·</span>
-                  <span>{entry.sources.slabs.inStockCount} slabs</span>
-                  <span>·</span>
-                  <span>{entry.sources.purchases.count} purchase bills</span>
-                  <span>·</span>
-                  <span>{entry.sources.sales.count} sales bills</span>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => onSelectLocation(loc)}
-                  className="w-full h-9 rounded-lg border border-[#E2E8F0] hover:bg-slate-50 text-[12.5px] font-semibold text-[#2563EB] transition-colors"
-                >
-                  Inspect Branch Stock
-                </button>
               </div>
-            );
-          })}
+              <div>
+                <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                  Return Date
+                </label>
+                <input
+                  type="date"
+                  value={retDate}
+                  onChange={(e) => setRetDate(e.target.value)}
+                  className="w-full h-9 px-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums"
+                  required
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                Supplier
+              </label>
+              <select
+                value={retSupplier}
+                onChange={(e) => {
+                  setRetSupplier(e.target.value);
+                  setRetPurchaseBillId('');
+                }}
+                className="w-full h-9 px-2.5 text-[12.5px] rounded-lg border border-[#E2E8F0] bg-white"
+              >
+                {snapshot.suppliers.map((s) => (
+                  <option key={s.id} value={s.name}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                Returning Branch / Location
+              </label>
+              <select
+                value={retBranch}
+                onChange={(e) => setRetBranch(e.target.value)}
+                className="w-full h-9 px-2.5 text-[12.5px] rounded-lg border border-[#E2E8F0] bg-white"
+              >
+                {snapshot.locations.map((l) => (
+                  <option key={l.id} value={l.name}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[11px] font-medium text-[#64748B]">
+                  Purchase Bill to Reduce
+                </label>
+                {selectedRefBill && (
+                  <button
+                    type="button"
+                    onClick={() => loadItemsFromBill(selectedRefBill)}
+                    className="text-[11px] font-semibold text-[#2563EB] hover:underline"
+                  >
+                    Load Bill Items
+                  </button>
+                )}
+              </div>
+              <select
+                value={retPurchaseBillId}
+                onChange={(e) => setRetPurchaseBillId(e.target.value)}
+                className="w-full h-9 px-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white"
+              >
+                <option value="">
+                  Auto-match across {retSupplier} bills ({supplierBills.length})
+                </option>
+                {supplierBills.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {getDisplayBillNo(b)} · {b.branchName} · ₹{' '}
+                    {getPurchaseBillTotal(b).toLocaleString('en-IN')} ({b.status})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-2">
+              <div>
+                <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                  Reason for Return
+                </label>
+                <select
+                  value={retReason}
+                  onChange={(e) => setRetReason(e.target.value)}
+                  className="w-full h-9 px-2.5 text-[12.5px] rounded-lg border border-[#E2E8F0] bg-white"
+                >
+                  {RETURN_REASONS.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                  Notes / Inspection Remarks
+                </label>
+                <textarea
+                  rows={2}
+                  value={retNotes}
+                  onChange={(e) => setRetNotes(e.target.value)}
+                  placeholder="Describe damage, batch mismatch, or credit note reference..."
+                  className="w-full px-2.5 py-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-2.5 pt-1">
+              <div className="flex items-center justify-between">
+                <span className="text-[11.5px] font-semibold text-[#0F172A]">
+                  Return Items ({retItems.length})
+                </span>
+                <span className="text-[11px] text-[#64748B]">Add one or more products</span>
+              </div>
+
+              {retItems.map((row, idx) => (
+                <div
+                  key={row.id}
+                  className="rounded-lg border border-[#E2E8F0] bg-[#FAFBFD] p-3 space-y-2.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-semibold text-[#2563EB] uppercase tracking-wide">
+                      Item #{idx + 1}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={retItems.length <= 1}
+                      aria-label={`Delete return item ${idx + 1}`}
+                      onClick={() =>
+                        setRetItems((prev) =>
+                          prev.length > 1 ? prev.filter((item) => item.id !== row.id) : prev,
+                        )
+                      }
+                      className="p-1 rounded-md text-[#64748B] hover:text-[#DC2626] hover:bg-rose-50 transition-colors disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-[#64748B]"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="text-[11px] font-medium text-[#64748B]">
+                        Product &amp; Size
+                      </label>
+                      {row.itemCode && (
+                        <span className="text-[10.5px] font-mono font-semibold text-[#2563EB]">
+                          {row.itemCode}
+                        </span>
+                      )}
+                    </div>
+                    <select
+                      value={row.itemCode}
+                      onChange={(e) => {
+                        const nextCode = e.target.value;
+                        const found = findBillableByCode(nextCode);
+                        updateRetItem(row.id, (prev) => {
+                          const qtyNum = Number(prev.qty) || 0;
+                          return {
+                            ...prev,
+                            itemCode: nextCode,
+                            unit: found ? found.unit : prev.unit,
+                            amountInr: found
+                              ? String(Math.round(qtyNum * found.unitPriceInr))
+                              : prev.amountInr,
+                          };
+                        });
+                      }}
+                      className="w-full h-9 px-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white"
+                    >
+                      {slabBillableOptions.length > 0 && (
+                        <optgroup label="Slabs (Slab SKU)">
+                          {slabBillableOptions.map((o) => (
+                            <option key={o.id} value={o.itemCode}>
+                              {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {productBillableOptions.length > 0 && (
+                        <optgroup label="Products (Product SKU)">
+                          {productBillableOptions.map((o) => (
+                            <option key={o.id} value={o.itemCode}>
+                              {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                        Qty
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={row.qty}
+                        onChange={(e) => {
+                          const nextQty = e.target.value;
+                          const found = findBillableByCode(row.itemCode);
+                          updateRetItem(row.id, (prev) => ({
+                            ...prev,
+                            qty: nextQty,
+                            amountInr:
+                              found && Number(nextQty) > 0
+                                ? String(Math.round(Number(nextQty) * found.unitPriceInr))
+                                : prev.amountInr,
+                          }));
+                        }}
+                        className="w-full h-9 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                        Unit
+                      </label>
+                      <select
+                        value={row.unit}
+                        onChange={(e) =>
+                          updateRetItem(row.id, (prev) => ({
+                            ...prev,
+                            unit: e.target.value as UnitType,
+                          }))
+                        }
+                        className="w-full h-9 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white"
+                      >
+                        {SHOP_UNITS.map((u) => (
+                          <option key={u} value={u}>
+                            {u}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                        Amount (₹)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={row.amountInr}
+                        onChange={(e) =>
+                          updateRetItem(row.id, (prev) => ({
+                            ...prev,
+                            amountInr: e.target.value,
+                          }))
+                        }
+                        className="w-full h-9 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <input
+                      type="text"
+                      value={row.reason}
+                      onChange={(e) =>
+                        updateRetItem(row.id, (prev) => ({
+                          ...prev,
+                          reason: e.target.value,
+                        }))
+                      }
+                      placeholder="Optional item note (e.g., chipped edge, hairline crack)"
+                      className="w-full h-8 px-2.5 text-[11.5px] rounded-lg border border-[#E2E8F0] bg-white"
+                    />
+                  </div>
+                </div>
+              ))}
+
+              <button
+                type="button"
+                onClick={() =>
+                  setRetItems((prev) => [...prev, createDefaultReturnItem(prev.length)])
+                }
+                className="w-full h-9 rounded-lg border border-dashed border-[#2563EB]/50 bg-[#EEF4FF]/50 hover:bg-[#EEF4FF] text-[#1D63ED] text-[12px] font-semibold inline-flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Add Another Item</span>
+              </button>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                Total Return Amount (₹) <span className="text-[#2563EB] font-normal">· Auto</span>
+              </label>
+              <input
+                type="text"
+                readOnly
+                value={`₹ ${retCalculatedTotal.toLocaleString('en-IN')}`}
+                className="w-full h-9 px-3 text-[13px] font-bold text-[#0F172A] rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] tabular-nums"
+              />
+            </div>
+
+            {retError && (
+              <div className="px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-[12px] text-[#DC2626]">
+                {retError}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={savingReturn}
+              className="w-full h-9 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[12.5px] font-semibold disabled:opacity-60"
+            >
+              {savingReturn
+                ? 'Recording Return...'
+                : 'Submit Return & Update Purchase Bills'}
+            </button>
+          </form>
+
+          <div className="lg:col-span-2 bg-white border border-[#E5E9F0] rounded-xl p-5 space-y-3.5">
+            {(() => {
+              const retLocationOptions = Array.from(
+                new Set([
+                  ...snapshot.locations.map((l) => l.name),
+                  ...allReturns.map((r) => r.branchName),
+                ]),
+              ).filter(Boolean);
+
+              const retSupplierOptions = Array.from(
+                new Set([
+                  ...snapshot.suppliers.map((s) => s.name),
+                  ...allReturns.map((r) => r.supplierName),
+                ]),
+              ).filter(Boolean);
+
+              const q = retSearch.trim().toLowerCase();
+              const filteredReturns = allReturns.filter((r) => {
+                if (retLocationFilter !== 'All' && r.branchName !== retLocationFilter) {
+                  return false;
+                }
+                if (retSupplierFilter !== 'All' && r.supplierName !== retSupplierFilter) {
+                  return false;
+                }
+                const iso = parseDateLabelToIso(r.dateLabel, r.dateIso);
+                if (retDateFrom && iso < retDateFrom) return false;
+                if (retDateTo && iso > retDateTo) return false;
+                if (q) {
+                  const billsJoined = (r.affectedBills || []).join(' ').toLowerCase();
+                  const matchesText =
+                    r.returnNo.toLowerCase().includes(q) ||
+                    r.supplierName.toLowerCase().includes(q) ||
+                    r.branchName.toLowerCase().includes(q) ||
+                    r.reason.toLowerCase().includes(q) ||
+                    r.itemSummary.toLowerCase().includes(q) ||
+                    billsJoined.includes(q);
+                  if (!matchesText) return false;
+                }
+                return true;
+              });
+
+              const hasRetFilters =
+                Boolean(retSearch.trim()) ||
+                Boolean(retDateFrom) ||
+                Boolean(retDateTo) ||
+                retLocationFilter !== 'All' ||
+                retSupplierFilter !== 'All';
+
+              const filteredTotalAmt = filteredReturns.reduce(
+                (sum, r) => sum + (Number(r.totalInr) || 0),
+                0,
+              );
+
+              return (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h2 className="text-[14px] font-semibold text-[#0F172A]">
+                      Returns Ledger (
+                      {hasRetFilters
+                        ? `${filteredReturns.length} of ${allReturns.length}`
+                        : allReturns.length}
+                      )
+                    </h2>
+                    <div className="flex items-center gap-3">
+                      <span className="text-[12px] text-[#64748B] tabular-nums">
+                        Total Returned:{' '}
+                        <strong className="text-[#0F172A]">
+                          ₹ {filteredTotalAmt.toLocaleString('en-IN')}
+                        </strong>
+                      </span>
+                      {hasRetFilters && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRetSearch('');
+                            setRetDateFrom('');
+                            setRetDateTo('');
+                            setRetLocationFilter('All');
+                            setRetSupplierFilter('All');
+                          }}
+                          className="h-7 px-2.5 rounded-lg border border-[#E2E8F0] bg-[#FAFBFD] hover:bg-slate-100 text-[11.5px] font-medium text-[#475569] inline-flex items-center gap-1 transition-colors"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          <span>Reset</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Filters: Search, Date Range, Location, Supplier */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-12 gap-2.5 p-3 rounded-lg bg-[#FAFBFD] border border-[#EBF0F6]">
+                    <div className="xl:col-span-4 relative">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Return No / Reason / Item
+                      </label>
+                      <div className="relative">
+                        <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          type="text"
+                          value={retSearch}
+                          onChange={(e) => setRetSearch(e.target.value)}
+                          placeholder="Search return no, bill, reason..."
+                          className="w-full h-8.5 pl-8 pr-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="xl:col-span-4">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Date Range
+                      </label>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <input
+                          type="date"
+                          aria-label="Return date from"
+                          value={retDateFrom}
+                          onChange={(e) => setRetDateFrom(e.target.value)}
+                          className="w-full h-8.5 px-2 text-[11.5px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums focus:outline-none focus:border-blue-500"
+                        />
+                        <input
+                          type="date"
+                          aria-label="Return date to"
+                          value={retDateTo}
+                          onChange={(e) => setRetDateTo(e.target.value)}
+                          className="w-full h-8.5 px-2 text-[11.5px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="xl:col-span-2">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Location
+                      </label>
+                      <select
+                        aria-label="Filter returns by location"
+                        value={retLocationFilter}
+                        onChange={(e) => setRetLocationFilter(e.target.value)}
+                        className="w-full h-8.5 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white text-[#0F172A] focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="All">All Locations</option>
+                        {retLocationOptions.map((locName) => (
+                          <option key={locName} value={locName}>
+                            {locName}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="xl:col-span-2">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Supplier
+                      </label>
+                      <select
+                        aria-label="Filter returns by supplier"
+                        value={retSupplierFilter}
+                        onChange={(e) => setRetSupplierFilter(e.target.value)}
+                        className="w-full h-8.5 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white text-[#0F172A] focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="All">All Suppliers</option>
+                        {retSupplierOptions.map((supName) => (
+                          <option key={supName} value={supName}>
+                            {supName}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse min-w-[760px]">
+                      <thead>
+                        <tr className="border-b border-[#E5E9F0] text-[11px] font-medium text-[#64748B]">
+                          <th className="py-2 pr-2">Return No</th>
+                          <th className="py-2 px-2">Date</th>
+                          <th className="py-2 px-2">Supplier</th>
+                          <th className="py-2 px-2">Branch</th>
+                          <th className="py-2 px-2">Items &amp; Reason</th>
+                          <th className="py-2 px-2">Bill Reduced</th>
+                          <th className="py-2 px-2 text-right">Amount</th>
+                          <th className="py-2 pl-2 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#F1F5F9] text-[12px]">
+                        {filteredReturns.length === 0 ? (
+                          <tr>
+                            <td colSpan={8} className="py-10 text-center text-[#64748B]">
+                              {allReturns.length === 0
+                                ? 'No supplier returns recorded yet. Use the form on the left to return damaged or excess stock and automatically reduce Purchase Bills.'
+                                : 'No returns match the selected filters.'}
+                            </td>
+                          </tr>
+                        ) : (
+                          filteredReturns.map((r) => (
+                            <tr key={r.id} className="hover:bg-slate-50/80">
+                              <td className="py-2.5 pr-2 font-mono font-medium whitespace-nowrap text-[#0F172A]">
+                                {r.returnNo}
+                              </td>
+                              <td className="py-2.5 px-2 text-[#64748B] whitespace-nowrap">
+                                {r.dateLabel}
+                              </td>
+                              <td className="py-2.5 px-2 text-[#0F172A] font-medium">
+                                {r.supplierName}
+                              </td>
+                              <td className="py-2.5 px-2 text-[#475569] whitespace-nowrap">
+                                {r.branchName}
+                              </td>
+                              <td className="py-2.5 px-2">
+                                <div className="font-medium text-[#0F172A]">
+                                  {r.itemSummary} ({r.qty.toLocaleString('en-IN')} {r.unit})
+                                </div>
+                                <div className="text-[11px] text-[#64748B]">
+                                  {r.reason}
+                                  {r.notes ? ` · ${r.notes}` : ''}
+                                </div>
+                              </td>
+                              <td className="py-2.5 px-2 font-mono text-[11.5px] text-[#2563EB] whitespace-nowrap">
+                                {r.affectedBills && r.affectedBills.length > 0
+                                  ? r.affectedBills.join(', ')
+                                  : r.purchaseBillNo || '—'}
+                              </td>
+                              <td className="py-2.5 px-2 text-right font-semibold text-[#DC2626] tabular-nums whitespace-nowrap">
+                                -₹ {r.totalInr.toLocaleString('en-IN')}
+                              </td>
+                              <td className="py-2.5 pl-2 text-right whitespace-nowrap">
+                                <button
+                                  type="button"
+                                  onClick={() => setViewReturn(r)}
+                                  className="h-7 px-2.5 rounded-lg border border-[#E2E8F0] bg-white hover:bg-[#EEF4FF] hover:border-blue-200 hover:text-[#1D63ED] text-[#334155] text-[11.5px] font-medium inline-flex items-center gap-1.5 transition-colors"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                  <span>View</span>
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
         </div>
       </div>
     );
@@ -3584,6 +4692,7 @@ export function SecondaryViews({
         snapshot={snapshot}
         onSelectLocation={onSelectLocation}
         onExportCsv={onExportCsv}
+        onCreateTransfer={onCreateTransfer}
       />
     );
   }
@@ -5185,6 +6294,137 @@ export function SecondaryViews({
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>{deletingSupplier ? 'Deleting...' : 'Delete Supplier'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {viewReturn && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-slate-900/35 backdrop-blur-[1px]"
+            onClick={() => setViewReturn(null)}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="relative z-10 w-full max-w-2xl bg-white rounded-xl border border-[#E5E9F0] shadow-xl flex flex-col max-h-[90vh] overflow-hidden"
+          >
+            <div className="px-6 py-4 border-b border-[#E5E9F0] flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2 text-[11.5px]">
+                  <span className="font-mono font-semibold text-[#2563EB]">
+                    {viewReturn.returnNo}
+                  </span>
+                  <span className="text-[#CBD5E1]">·</span>
+                  <span className="text-[#64748B]">{viewReturn.dateLabel}</span>
+                  <span className="text-[#CBD5E1]">·</span>
+                  <span className="font-semibold text-[#16A34A]">{viewReturn.status}</span>
+                </div>
+                <h3 className="text-[17px] font-bold text-[#0F172A] mt-0.5 truncate">
+                  {viewReturn.supplierName}
+                </h3>
+                <p className="text-[12px] text-[#64748B]">
+                  Returned From Branch: {viewReturn.branchName}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewReturn(null)}
+                aria-label="Close return details modal"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto flex-1 space-y-4">
+              <div className="rounded-xl border border-[#E5E9F0] bg-[#FAFBFD] p-3.5 grid grid-cols-1 sm:grid-cols-2 gap-3 text-[12px]">
+                <div>
+                  <div className="text-[11px] font-medium text-[#64748B]">Return Reason</div>
+                  <div className="font-semibold text-[#0F172A] mt-0.5">{viewReturn.reason}</div>
+                  {viewReturn.notes && (
+                    <div className="text-[11.5px] text-[#475569] mt-0.5">{viewReturn.notes}</div>
+                  )}
+                </div>
+                <div>
+                  <div className="text-[11px] font-medium text-[#64748B]">
+                    Purchase Bills Reduced
+                  </div>
+                  <div className="font-mono font-semibold text-[#2563EB] mt-0.5">
+                    {viewReturn.affectedBills && viewReturn.affectedBills.length > 0
+                      ? viewReturn.affectedBills.join(', ')
+                      : viewReturn.purchaseBillNo || 'No matching purchase bill reduced'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto border border-[#E5E9F0] rounded-xl">
+                <table className="w-full text-left border-collapse min-w-[540px]">
+                  <thead>
+                    <tr className="bg-[#FAFBFD] border-b border-[#E5E9F0] text-[11px] font-medium text-[#64748B]">
+                      <th className="py-2.5 pl-4 pr-2">#</th>
+                      <th className="py-2.5 px-2">Product &amp; Size</th>
+                      <th className="py-2.5 px-2 text-right">Qty</th>
+                      <th className="py-2.5 px-2">Unit</th>
+                      <th className="py-2.5 px-2">Item Note</th>
+                      <th className="py-2.5 pl-2 pr-4 text-right">Return Amount (₹)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#F1F5F9] text-[12.5px]">
+                    {viewReturn.items.map((it, idx) => (
+                      <tr key={it.id} className="hover:bg-slate-50/70">
+                        <td className="py-3 pl-4 pr-2 text-[#64748B] font-mono text-[11.5px]">
+                          {idx + 1}
+                        </td>
+                        <td className="py-3 px-2">
+                          <div className="font-semibold text-[#0F172A]">{it.itemName}</div>
+                          <div className="text-[11px] text-[#64748B] font-mono">
+                            {it.dimensions}
+                            {it.itemCode ? ` · ${it.itemCode}` : ''}
+                          </div>
+                        </td>
+                        <td className="py-3 px-2 text-right font-medium tabular-nums whitespace-nowrap">
+                          {it.qty.toLocaleString('en-IN')}
+                        </td>
+                        <td className="py-3 px-2 text-[#2563EB] font-medium whitespace-nowrap">
+                          {it.unit}
+                        </td>
+                        <td className="py-3 px-2 text-[11.5px] text-[#64748B]">
+                          {it.reason || '—'}
+                        </td>
+                        <td className="py-3 pl-2 pr-4 text-right font-semibold text-[#DC2626] tabular-nums whitespace-nowrap">
+                          -₹ {it.amountInr.toLocaleString('en-IN')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-[#F8FAFC] border-t border-[#E5E9F0]">
+                      <td
+                        colSpan={5}
+                        className="py-3 pl-4 pr-2 text-[12.5px] font-semibold text-[#0F172A]"
+                      >
+                        Total Returned ({viewReturn.items.length} item
+                        {viewReturn.items.length === 1 ? '' : 's'})
+                      </td>
+                      <td className="py-3 pl-2 pr-4 text-right text-[14px] font-bold text-[#DC2626] tabular-nums whitespace-nowrap">
+                        -₹ {viewReturn.totalInr.toLocaleString('en-IN')}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+
+            <div className="px-6 py-3.5 border-t border-[#E5E9F0] bg-[#FAFBFD] flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() => setViewReturn(null)}
+                className="h-9 px-4 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[12.5px] font-semibold"
+              >
+                Close
               </button>
             </div>
           </div>

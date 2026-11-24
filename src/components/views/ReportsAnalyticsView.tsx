@@ -25,14 +25,24 @@ import {
   getPurchaseBillLines,
   getSalesBillLines,
 } from '../../utils/branchMetrics';
+import {
+  computeSlowMovingStockAnalysis,
+  SlowMovingAnalyticsPanel,
+} from './SlowMovingAnalyticsPanel';
 
 interface ReportsAnalyticsViewProps {
   snapshot: InventorySnapshot;
   onSelectLocation: (loc: LocationRow) => void;
   onExportCsv: () => void;
+  onCreateTransfer?: (payload: {
+    itemCode: string;
+    fromLocation: string;
+    toLocation: string;
+    quantity: number;
+  }) => Promise<void>;
 }
 
-type ReportTab = 'sales' | 'purchase' | 'stock' | 'profit';
+type ReportTab = 'sales' | 'purchase' | 'stock' | 'profit' | 'analytics';
 type DateFilterPreset = 'all' | 'this_month' | 'apr_2024' | 'custom';
 
 const MONTHS_SHORT = [
@@ -197,6 +207,7 @@ function formatAxisTickInr(val: number): string {
 export function ReportsAnalyticsView({
   snapshot,
   onSelectLocation,
+  onCreateTransfer,
 }: ReportsAnalyticsViewProps) {
   const [activeTab, setActiveTab] = useState<ReportTab>('sales');
   const [datePreset, setDatePreset] = useState<DateFilterPreset>('all');
@@ -208,6 +219,11 @@ export function ReportsAnalyticsView({
   const [hoveredOverviewIdx, setHoveredOverviewIdx] = useState<number | null>(null);
   const [hoveredBranchIdx, setHoveredBranchIdx] = useState<number | null>(null);
   const [hoveredCat, setHoveredCat] = useState<StoneCategory | null>(null);
+
+  const slowMovingAnalysis = useMemo(
+    () => computeSlowMovingStockAnalysis(snapshot),
+    [snapshot],
+  );
 
   // Filter purchase & sales bills by date preset
   const filteredBills = useMemo(() => {
@@ -836,6 +852,53 @@ export function ReportsAnalyticsView({
 
   // Export Profit & Loss / Active Tab CSV
   function handleExportReportCsv() {
+    if (activeTab === 'analytics') {
+      const headers = [
+        'SKU',
+        'Source',
+        'Design / Product Name',
+        'Dimensions',
+        'Category',
+        'Finish',
+        'Branch',
+        'On-Hand Qty',
+        'Unit',
+        'Blocked Stock Value (INR)',
+        'Days in Warehouse',
+        'Age Bracket',
+        'Sales Qty',
+        'Turnover (%)',
+        'Movement Status',
+        'Recommended Action',
+      ];
+      const rows = slowMovingAnalysis.items.map((item) => [
+        `"${item.itemCode}"`,
+        `"${item.sourceKind}"`,
+        `"${item.itemName.replace(/"/g, '""')}"`,
+        `"${item.dimensions}"`,
+        `"${item.category}"`,
+        `"${item.finish}"`,
+        `"${item.branchName}"`,
+        item.qty,
+        `"${item.unit}"`,
+        item.stockValueInr,
+        item.ageDays,
+        `"${item.ageBucket}"`,
+        item.salesQty,
+        item.turnoverPct.toFixed(1),
+        `"${item.movementStatus}"`,
+        `"${item.recommendation.replace(/"/g, '""')}"`,
+      ]);
+      const csv = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+      const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `stonepulse-slow-moving-aging-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
     if (activeTab === 'stock') {
       const headers = [
         'SKU',
@@ -976,7 +1039,8 @@ export function ReportsAnalyticsView({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Date Range Picker Control */}
+          {/* Date Range Picker Control (for bill-period tabs) */}
+          {activeTab !== 'analytics' && (
           <div className="relative">
             <button
               type="button"
@@ -1060,6 +1124,7 @@ export function ReportsAnalyticsView({
               </div>
             )}
           </div>
+          )}
 
           <button
             type="button"
@@ -1081,7 +1146,7 @@ export function ReportsAnalyticsView({
         </div>
       </div>
 
-      {/* Underline Tab Bar (Sales · Purchase · Stock · Profit) */}
+      {/* Underline Tab Bar (Sales · Purchase · Stock · Profit · Analytics) */}
       <div className="border-b border-[#E5E9F0] flex items-center gap-6 overflow-x-auto">
         {(
           [
@@ -1089,6 +1154,7 @@ export function ReportsAnalyticsView({
             {id: 'purchase', label: 'Purchase'},
             {id: 'stock', label: 'Stock'},
             {id: 'profit', label: 'Profit'},
+            {id: 'analytics', label: 'Analytics'},
           ] as const
         ).map((tab) => {
           const isActive = activeTab === tab.id;
@@ -1114,6 +1180,15 @@ export function ReportsAnalyticsView({
         })}
       </div>
 
+      {activeTab === 'analytics' ? (
+        <SlowMovingAnalyticsPanel
+          snapshot={snapshot}
+          analysis={slowMovingAnalysis}
+          onSelectLocation={onSelectLocation}
+          onCreateTransfer={onCreateTransfer}
+        />
+      ) : (
+        <>
       {/* Row 1: Overview Bar Chart + Contextual Summary Card (Stacked full-width on Stock, Side-by-side on Profit) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
         {/* Overview Grouped Bar Chart */}
@@ -2005,6 +2080,8 @@ export function ReportsAnalyticsView({
           </>
         )}
         </div>
+      )}
+        </>
       )}
     </div>
   );

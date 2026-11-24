@@ -4,6 +4,7 @@ import type {
   InventoryAlert,
   InventorySnapshot,
   PurchaseBill,
+  PurchaseReturn,
   SalesBill,
   SalesPaymentStatus,
   SlabLot,
@@ -227,6 +228,31 @@ export const api = {
       `/api/inventory/purchase-bills/${billId}`,
       {
         method: 'PUT',
+        body: JSON.stringify(payload),
+      },
+    ),
+
+  createPurchaseReturn: (payload: {
+    returnNo: string;
+    supplierName: string;
+    branchName: string;
+    purchaseBillId?: string;
+    reason: string;
+    notes?: string;
+    dateLabel: string;
+    dateIso?: string;
+    items: Array<{
+      itemCode: string;
+      qty: number;
+      unit: UnitType;
+      amountInr: number;
+      reason?: string;
+    }>;
+  }) =>
+    requestJson<{purchaseReturn: PurchaseReturn; snapshot: InventorySnapshot}>(
+      '/api/inventory/returns',
+      {
+        method: 'POST',
         body: JSON.stringify(payload),
       },
     ),

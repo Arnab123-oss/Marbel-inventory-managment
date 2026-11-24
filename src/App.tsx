@@ -18,6 +18,7 @@ import {TopHeader} from './components/TopHeader';
 import {SecondaryViews} from './components/views/SecondaryViews';
 import {DraggableWidgetShell} from './components/widgets/DraggableWidgetShell';
 import {KpiCard} from './components/widgets/KpiCard';
+import {OutstandingPaymentsWidget} from './components/widgets/OutstandingPaymentsWidget';
 import {RecentActivitiesWidget} from './components/widgets/RecentActivitiesWidget';
 import {RecentAlertsWidget} from './components/widgets/RecentAlertsWidget';
 import {TopProductsWidget} from './components/widgets/TopProductsWidget';
@@ -32,7 +33,6 @@ import type {
   CustomerRecord,
   DashboardFilters,
   DashboardLayout,
-  DateRangeKey,
   InventorySnapshot,
   KpiId,
   LocationRow,
@@ -58,18 +58,19 @@ const DEFAULT_KPI_ORDER: KpiId[] = [
 ];
 
 const DEFAULT_WIDGET_ORDER: WidgetId[] = [
+  'outstandingPayments',
   'salesTrend',
   'valueTrend',
   'stockValueByLocation',
   'topProducts',
   'recentActivities',
   'stockStatusSummary',
-  'accuracyTrend',
   'topVarianceItems',
   'recentAlerts',
 ];
 
 const DEFAULT_SPANS: Record<WidgetId, 1 | 2 | 3> = {
+  outstandingPayments: 3,
   salesTrend: 1,
   topProducts: 1,
   recentActivities: 2,
@@ -84,6 +85,7 @@ const DEFAULT_SPANS: Record<WidgetId, 1 | 2 | 3> = {
 };
 
 const WIDGET_TITLES: Record<WidgetId, string> = {
+  outstandingPayments: 'Outstanding Payments',
   salesTrend: 'Sales Trend',
   topProducts: 'Top Products',
   recentActivities: 'Recent Activities',
@@ -148,7 +150,6 @@ export default function App() {
   const [streamConnected, setStreamConnected] = useState(false);
   const [customizeMode, setCustomizeMode] = useState(false);
 
-  const [dateRangeKey, setDateRangeKey] = useState<DateRangeKey>('apr_2024');
   const [filters, setFilters] = useState<DashboardFilters>({
     locationType: 'All',
     unitFilter: 'All',
@@ -338,29 +339,12 @@ export default function App() {
       return true;
     });
 
-    const trends =
-      dateRangeKey === 'last_7_days'
-        ? snapshot.trends.slice(-7)
-        : dateRangeKey === 'mar_2024'
-          ? snapshot.trends.map((pt, i) => ({
-              date: pt.date.replace('Apr', 'Mar'),
-              valueCr: Number((pt.valueCr * (0.91 + (i % 3) * 0.015)).toFixed(2)),
-              accuracyPct: Number(Math.max(96.5, pt.accuracyPct - 0.6).toFixed(2)),
-            }))
-          : dateRangeKey === 'q1_2024'
-            ? snapshot.trends.map((pt, i) => ({
-                date: `W${i + 1}`,
-                valueCr: Number((pt.valueCr * 0.88 + (i % 4) * 0.4).toFixed(2)),
-                accuracyPct: Number(Math.max(96.0, pt.accuracyPct - 0.8).toFixed(2)),
-              }))
-            : snapshot.trends;
-
     return {
       filteredLocations,
       filteredVarianceItems,
-      trends,
+      trends: snapshot.trends,
     };
-  }, [snapshot, filters, dateRangeKey]);
+  }, [snapshot, filters, computedLocations]);
 
   const persistLayout = useCallback(async (next: DashboardLayout) => {
     setLayout(next);
@@ -440,7 +424,16 @@ export default function App() {
 
   function handleToggleWidgetSpan(id: WidgetId) {
     const current = layout.widgetSpans[id] || 1;
-    const nextSpan: 1 | 2 = current === 1 ? 2 : 1;
+    const nextSpan: 1 | 2 | 3 =
+      id === 'outstandingPayments'
+        ? current === 3
+          ? 2
+          : current === 2
+            ? 1
+            : 3
+        : current === 1
+          ? 2
+          : 1;
     persistLayout({
       ...layout,
       widgetSpans: {...layout.widgetSpans, [id]: nextSpan},
@@ -481,7 +474,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `marble-shop-inventory-${dateRangeKey}.csv`;
+    link.download = `marble-shop-inventory-${new Date().toISOString().slice(0, 10)}.csv`;
     link.click();
     URL.revokeObjectURL(url);
     showToast('Exported marble & tile inventory report (.csv)');
@@ -645,6 +638,34 @@ export default function App() {
     return res.bill;
   }
 
+  async function handleCreatePurchaseReturn(payload: {
+    returnNo: string;
+    supplierName: string;
+    branchName: string;
+    purchaseBillId?: string;
+    reason: string;
+    notes?: string;
+    dateLabel: string;
+    dateIso?: string;
+    items: Array<{
+      itemCode: string;
+      qty: number;
+      unit: UnitType;
+      amountInr: number;
+      reason?: string;
+    }>;
+  }) {
+    const res = await api.createPurchaseReturn(payload);
+    setSnapshot(res.snapshot);
+    const affectedText =
+      res.purchaseReturn.affectedBills && res.purchaseReturn.affectedBills.length > 0
+        ? ` · reduced ${res.purchaseReturn.affectedBills.join(', ')}`
+        : '';
+    showToast(
+      `Recorded return ${res.purchaseReturn.returnNo} (${res.purchaseReturn.items.length} item${res.purchaseReturn.items.length === 1 ? '' : 's'})${affectedText}`,
+    );
+  }
+
   async function handleCreateSalesBill(payload: {
     invoiceNo: string;
     customerName: string;
@@ -789,6 +810,14 @@ export default function App() {
     currentDerived: NonNullable<typeof derivedView>,
   ) {
     switch (id) {
+      case 'outstandingPayments':
+        return (
+          <OutstandingPaymentsWidget
+            salesBills={currentSnapshot.salesBills}
+            purchaseBills={currentSnapshot.purchaseBills}
+            onNavigate={(sec) => setActiveSection(sec)}
+          />
+        );
       case 'salesTrend':
         return <SalesTrendChart salesBills={currentSnapshot.salesBills} />;
       case 'topProducts':
@@ -805,6 +834,7 @@ export default function App() {
           <RecentActivitiesWidget
             salesBills={currentSnapshot.salesBills}
             purchaseBills={currentSnapshot.purchaseBills}
+            purchaseReturns={currentSnapshot.purchaseReturns || []}
             transfers={currentSnapshot.transfers}
             onNavigate={(sec) => setActiveSection(sec)}
           />
@@ -843,18 +873,7 @@ export default function App() {
           />
         );
       case 'accuracyTrend':
-        return (
-          <TrendLineChart
-            points={currentDerived.trends}
-            metric="accuracyPct"
-            strokeColor="#16A34A"
-            yMin={92}
-            yMax={100}
-            yTicks={[92, 94, 96, 98, 100]}
-            formatYTick={(v) => `${v}%`}
-            formatTooltipVal={(v) => `${v.toFixed(2)}% Accurate`}
-          />
-        );
+        return null;
       case 'topVarianceItems':
         return (
           <TopVarianceWidget
@@ -891,10 +910,6 @@ export default function App() {
         <TopHeader
           user={user}
           activeSection={activeSection}
-          dateRangeKey={dateRangeKey}
-          onChangeDateRange={setDateRangeKey}
-          filters={filters}
-          onChangeFilters={setFilters}
           onExportCsv={handleExportCsv}
           onResetLayout={handleResetLayout}
           onLogout={handleLogout}
@@ -917,23 +932,6 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
-                  {/* Inline Quick Unit Filter */}
-                  <div className="flex items-center gap-1 p-1 bg-white border border-[#E2E8F0] rounded-lg">
-                    {(['All', 'sq. ft', 'pcs', 'box'] as const).map((u) => (
-                      <button
-                        key={u}
-                        type="button"
-                        onClick={() => setFilters({...filters, unitFilter: u})}
-                        className={`px-2.5 py-1 text-[11.5px] font-medium rounded-md transition-colors whitespace-nowrap ${
-                          filters.unitFilter === u
-                            ? 'bg-[#EEF4FF] text-[#1D63ED]'
-                            : 'text-[#64748B] hover:text-[#0F172A]'
-                        }`}
-                      >
-                        {u === 'All' ? 'All Units' : u}
-                      </button>
-                    ))}
-                  </div>
 
                   <button
                     type="button"
@@ -1068,7 +1066,26 @@ export default function App() {
                         dropTargetWidget === widgetId && draggingWidget !== widgetId
                       }
                       headerExtra={
-                        widgetId === 'recentActivities' ? (
+                        widgetId === 'outstandingPayments' ? (
+                          <div className="ml-auto flex items-center gap-3 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => setActiveSection('sales-bills')}
+                              className="inline-flex items-center gap-1 text-[12px] font-semibold text-[#2563EB] hover:text-[#1D4ED8] hover:underline whitespace-nowrap"
+                            >
+                              <span>Sales Bills</span>
+                              <ArrowRight className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setActiveSection('purchase-bills')}
+                              className="inline-flex items-center gap-1 text-[12px] font-semibold text-[#475569] hover:text-[#0F172A] hover:underline whitespace-nowrap"
+                            >
+                              <span>Purchase Bills</span>
+                              <ArrowRight className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ) : widgetId === 'recentActivities' ? (
                           <button
                             type="button"
                             onClick={() => setActiveSection('sales-bills')}
@@ -1112,6 +1129,7 @@ export default function App() {
               onDeleteSlabLot={handleDeleteSlabLot}
               onCreatePurchaseBill={handleCreatePurchaseBill}
               onUpdatePurchaseBill={handleUpdatePurchaseBill}
+              onCreatePurchaseReturn={handleCreatePurchaseReturn}
               onCreateSalesBill={handleCreateSalesBill}
               onUpdateSalesBill={handleUpdateSalesBill}
               onCreateTransfer={handleCreateTransfer}

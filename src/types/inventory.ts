@@ -9,6 +9,7 @@ export type NavSection =
   | 'customers'
   | 'suppliers'
   | 'branches'
+  | 'returns'
   | 'reports'
   | 'settings';
 
@@ -33,6 +34,7 @@ export type KpiId =
   | 'stockInTransit';
 
 export type WidgetId =
+  | 'outstandingPayments'
   | 'salesTrend'
   | 'topProducts'
   | 'recentActivities'
@@ -149,6 +151,7 @@ export interface VarianceItem {
   unitPriceInr: number;
   status: 'In Stock' | 'Low Stock' | 'Out of Stock' | 'Overstock';
   lastCountedAt: string;
+  stockedDateIso?: string;
   imageUrl?: string;
   enabled?: boolean;
 }
@@ -157,7 +160,7 @@ export interface ProductHistoryEntry {
   id: string;
   itemId: string;
   itemCode: string;
-  type: 'Purchase' | 'Sale' | 'Transfer' | 'Adjustment';
+  type: 'Purchase' | 'Sale' | 'Transfer' | 'Adjustment' | 'Return';
   referenceNo: string;
   quantityDelta: number;
   unit: UnitType;
@@ -182,6 +185,7 @@ export interface SlabLot {
   branchName: string;
   finish: 'Polished' | 'Honed' | 'Leather';
   status: 'In Stock' | 'Out of Stock';
+  stockedDateIso?: string;
   imageUrl?: string;
   enabled?: boolean;
 }
@@ -209,6 +213,37 @@ export interface PurchaseBill {
   dateLabel: string;
   dateIso?: string;
   items?: PurchaseBillItem[];
+}
+
+export interface PurchaseReturnItem {
+  id: string;
+  itemCode: string;
+  itemName: string;
+  dimensions: string;
+  qty: number;
+  unit: UnitType;
+  amountInr: number;
+  reason?: string;
+}
+
+export interface PurchaseReturn {
+  id: string;
+  returnNo: string;
+  supplierName: string;
+  branchName: string;
+  purchaseBillId?: string;
+  purchaseBillNo?: string;
+  affectedBills?: string[];
+  reason: string;
+  notes?: string;
+  itemSummary: string;
+  qty: number;
+  unit: UnitType;
+  totalInr: number;
+  status: 'Completed' | 'Adjusted';
+  dateLabel: string;
+  dateIso?: string;
+  items: PurchaseReturnItem[];
 }
 
 export type SalesPaymentStatus = 'Paid' | 'Partially Paid' | 'Due';
@@ -301,11 +336,13 @@ export interface InventorySnapshot {
   history: ProductHistoryEntry[];
   slabs: SlabLot[];
   purchaseBills: PurchaseBill[];
+  purchaseReturns?: PurchaseReturn[];
   salesBills: SalesBill[];
   customers: CustomerRecord[];
   suppliers: SupplierRecord[];
   alerts: InventoryAlert[];
   transfers: StockTransfer[];
+  crossBranchSeedApplied?: boolean;
 }
 
 export type DateRangeKey = 'apr_2024' | 'last_7_days' | 'mar_2024' | 'q1_2024';

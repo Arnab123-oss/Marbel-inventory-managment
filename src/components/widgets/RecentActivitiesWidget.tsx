@@ -1,8 +1,9 @@
-import {ArrowLeftRight, FileText, ShoppingBag} from 'lucide-react';
+import {ArrowLeftRight, FileText, ShoppingBag, Undo2} from 'lucide-react';
 import {useMemo} from 'react';
 import type {
   NavSection,
   PurchaseBill,
+  PurchaseReturn,
   SalesBill,
   StockTransfer,
 } from '../../types/inventory';
@@ -15,13 +16,14 @@ import {
 interface RecentActivitiesWidgetProps {
   salesBills: SalesBill[];
   purchaseBills: PurchaseBill[];
+  purchaseReturns?: PurchaseReturn[];
   transfers: StockTransfer[];
   onNavigate: (section: NavSection) => void;
 }
 
 interface ActivityItem {
   id: string;
-  kind: 'sale' | 'purchase' | 'transfer';
+  kind: 'sale' | 'purchase' | 'return' | 'transfer';
   title: string;
   subtitle: string;
   amountLabel: string;
@@ -68,6 +70,7 @@ function toSortableDate(dateLabel?: string, dateIso?: string): string {
 export function RecentActivitiesWidget({
   salesBills,
   purchaseBills,
+  purchaseReturns = [],
   transfers,
   onNavigate,
 }: RecentActivitiesWidgetProps) {
@@ -108,6 +111,19 @@ export function RecentActivitiesWidget({
       });
     }
 
+    for (const ret of purchaseReturns) {
+      list.push({
+        id: `return-${ret.id}`,
+        kind: 'return',
+        title: `Return #${ret.returnNo}`,
+        subtitle: `${ret.supplierName} · ${ret.branchName} (${ret.reason})`,
+        amountLabel: `-${formatInrExact(ret.totalInr)}`,
+        dateLabel: ret.dateLabel,
+        sortKey: `${toSortableDate(ret.dateLabel, ret.dateIso)}-4-${ret.id}`,
+        targetSection: 'returns',
+      });
+    }
+
     for (const trf of transfers.slice(0, 4)) {
       list.push({
         id: `trf-${trf.id}`,
@@ -122,7 +138,7 @@ export function RecentActivitiesWidget({
     }
 
     return list.sort((a, b) => b.sortKey.localeCompare(a.sortKey)).slice(0, 5);
-  }, [salesBills, purchaseBills, transfers]);
+  }, [salesBills, purchaseBills, purchaseReturns, transfers]);
 
   if (activities.length === 0) {
     return (
@@ -140,7 +156,9 @@ export function RecentActivitiesWidget({
             ? 'bg-blue-50 text-[#2563EB] ring-blue-100'
             : item.kind === 'purchase'
               ? 'bg-emerald-50 text-emerald-600 ring-emerald-100'
-              : 'bg-violet-50 text-violet-600 ring-violet-100';
+              : item.kind === 'return'
+                ? 'bg-amber-50 text-amber-600 ring-amber-100'
+                : 'bg-violet-50 text-violet-600 ring-violet-100';
 
         return (
           <button
@@ -157,6 +175,8 @@ export function RecentActivitiesWidget({
                   <FileText className="w-4 h-4" />
                 ) : item.kind === 'purchase' ? (
                   <ShoppingBag className="w-4 h-4" />
+                ) : item.kind === 'return' ? (
+                  <Undo2 className="w-4 h-4" />
                 ) : (
                   <ArrowLeftRight className="w-4 h-4" />
                 )}

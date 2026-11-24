@@ -10,6 +10,7 @@ import {
   Settings,
   ShoppingBag,
   Truck,
+  Undo2,
   Users,
   X,
 } from 'lucide-react';
@@ -38,6 +39,7 @@ const NAV_ITEMS: {
   {id: 'customers', label: 'Customers', icon: Users},
   {id: 'suppliers', label: 'Suppliers', icon: Truck},
   {id: 'branches', label: 'Branches', icon: Building2},
+  {id: 'returns', label: 'Returns', icon: Undo2},
   {id: 'reports', label: 'Reports', icon: FileText},
   {id: 'settings', label: 'Settings', icon: Settings},
 ];
