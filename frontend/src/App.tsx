@@ -668,6 +668,34 @@ export default function App() {
     );
   }
 
+  async function handleCreateSalesReturn(payload: {
+    returnNo: string;
+    customerName: string;
+    branchName: string;
+    salesBillId?: string;
+    reason: string;
+    notes?: string;
+    dateLabel: string;
+    dateIso?: string;
+    items: Array<{
+      itemCode: string;
+      qty: number;
+      unit: UnitType;
+      amountInr: number;
+      reason?: string;
+    }>;
+  }) {
+    const res = await api.createSalesReturn(payload);
+    setSnapshot(res.snapshot);
+    const affectedText =
+      res.salesReturn.affectedBills && res.salesReturn.affectedBills.length > 0
+        ? ` · reduced ${res.salesReturn.affectedBills.join(', ')}`
+        : '';
+    showToast(
+      `Recorded sales return ${res.salesReturn.returnNo} (${res.salesReturn.items.length} item${res.salesReturn.items.length === 1 ? '' : 's'})${affectedText}`,
+    );
+  }
+
   async function handleCreateSalesBill(payload: {
     invoiceNo: string;
     customerName: string;
@@ -837,6 +865,7 @@ export default function App() {
             salesBills={currentSnapshot.salesBills}
             purchaseBills={currentSnapshot.purchaseBills}
             purchaseReturns={currentSnapshot.purchaseReturns || []}
+            salesReturns={currentSnapshot.salesReturns || []}
             transfers={currentSnapshot.transfers}
             onNavigate={(sec) => setActiveSection(sec)}
           />
@@ -1132,6 +1161,7 @@ export default function App() {
               onCreatePurchaseBill={handleCreatePurchaseBill}
               onUpdatePurchaseBill={handleUpdatePurchaseBill}
               onCreatePurchaseReturn={handleCreatePurchaseReturn}
+              onCreateSalesReturn={handleCreateSalesReturn}
               onCreateSalesBill={handleCreateSalesBill}
               onUpdateSalesBill={handleUpdateSalesBill}
               onCreateTransfer={handleCreateTransfer}

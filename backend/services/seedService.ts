@@ -1348,6 +1348,7 @@ export function buildInitialSnapshot(): InventorySnapshot {
     purchaseBills,
     purchaseReturns: [],
     salesBills,
+    salesReturns: [],
     customers,
     suppliers,
     alerts,

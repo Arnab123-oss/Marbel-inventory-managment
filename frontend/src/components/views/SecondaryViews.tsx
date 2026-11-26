@@ -32,6 +32,7 @@ import type {
   PurchaseReturn,
   SalesBill,
   SalesPaymentStatus,
+  SalesReturn,
   SlabLot,
   StoneCategory,
   SupplierRecord,
@@ -151,6 +152,23 @@ interface SecondaryViewsProps {
     supplierName: string;
     branchName: string;
     purchaseBillId?: string;
+    reason: string;
+    notes?: string;
+    dateLabel: string;
+    dateIso?: string;
+    items: Array<{
+      itemCode: string;
+      qty: number;
+      unit: UnitType;
+      amountInr: number;
+      reason?: string;
+    }>;
+  }) => Promise<void>;
+  onCreateSalesReturn: (payload: {
+    returnNo: string;
+    customerName: string;
+    branchName: string;
+    salesBillId?: string;
     reason: string;
     notes?: string;
     dateLabel: string;
@@ -422,6 +440,40 @@ function buildFormattedReturnNo(rawInput: string, isoDate: string): string {
   return `${getReturnNoPrefixFromIso(isoDate)}${suffix}`;
 }
 
+const SALES_RETURN_REASONS = [
+  'Damaged on Delivery',
+  'Size / Shade Mismatch',
+  'Excess Quantity Billed',
+  'Crack / Edge Chipping',
+  'Exchange / Alteration',
+  'Other',
+];
+
+function getSalesReturnNoPrefixFromIso(isoDate: string): string {
+  const parts = isoDate.split('-');
+  if (parts.length === 3 && parts[0].length === 4 && parts[1].length === 2) {
+    return `SRET-${parts[1]}-${parts[0]}-`;
+  }
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  return `SRET-${month}-${now.getFullYear()}-`;
+}
+
+function extractSalesReturnNoSuffix(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^SRET-\d{2}-\d{4}-/i, '')
+    .replace(/^SRET-/i, '')
+    .replace(/^SR-\d{2}-\d{4}-/i, '')
+    .replace(/^SR-/i, '')
+    .trim();
+}
+
+function buildFormattedSalesReturnNo(rawInput: string, isoDate: string): string {
+  const suffix = extractSalesReturnNoSuffix(rawInput);
+  return `${getSalesReturnNoPrefixFromIso(isoDate)}${suffix}`;
+}
+
 interface SalesBillDraftItem {
   id: string;
   itemCode: string;
@@ -493,6 +545,7 @@ export function SecondaryViews({
   onCreatePurchaseBill,
   onUpdatePurchaseBill,
   onCreatePurchaseReturn,
+  onCreateSalesReturn,
   onCreateSalesBill,
   onUpdateSalesBill,
   onCreateTransfer,
@@ -838,11 +891,36 @@ export function SecondaryViews({
   const [retError, setRetError] = useState<string | null>(null);
   const [savingReturn, setSavingReturn] = useState(false);
   const [viewReturn, setViewReturn] = useState<PurchaseReturn | null>(null);
+  const [returnTab, setReturnTab] = useState<'purchase' | 'sales'>('purchase');
   const [retSearch, setRetSearch] = useState('');
   const [retDateFrom, setRetDateFrom] = useState('');
   const [retDateTo, setRetDateTo] = useState('');
   const [retLocationFilter, setRetLocationFilter] = useState('All');
   const [retSupplierFilter, setRetSupplierFilter] = useState('All');
+
+  // Sales Return state
+  const [sretNo, setSretNo] = useState(() =>
+    String(3101 + (snapshot.salesReturns?.length || 0)),
+  );
+  const [sretCustomer, setSretCustomer] = useState(
+    snapshot.customers[0]?.name || snapshot.salesBills[0]?.customerName || '',
+  );
+  const [sretBranch, setSretBranch] = useState(snapshot.locations[0]?.name || 'Main Showroom');
+  const [sretSalesBillId, setSretSalesBillId] = useState('');
+  const [sretDate, setSretDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [sretReason, setSretReason] = useState<string>(SALES_RETURN_REASONS[0]);
+  const [sretNotes, setSretNotes] = useState('');
+  const [sretItems, setSretItems] = useState<PurchaseReturnDraftItem[]>(() => [
+    createDefaultReturnItem(0),
+  ]);
+  const [sretError, setSretError] = useState<string | null>(null);
+  const [savingSalesReturn, setSavingSalesReturn] = useState(false);
+  const [viewSalesReturn, setViewSalesReturn] = useState<SalesReturn | null>(null);
+  const [sretSearch, setSretSearch] = useState('');
+  const [sretDateFrom, setSretDateFrom] = useState('');
+  const [sretDateTo, setSretDateTo] = useState('');
+  const [sretLocationFilter, setSretLocationFilter] = useState('All');
+  const [sretCustomerFilter, setSretCustomerFilter] = useState('All');
 
   // Transfer state
   const [transferItem, setTransferItem] = useState(
@@ -4040,6 +4118,8 @@ export function SecondaryViews({
 
   if (section === 'returns') {
     const allReturns = snapshot.purchaseReturns || [];
+    const allSalesReturns = snapshot.salesReturns || [];
+
     const supplierBills = snapshot.purchaseBills.filter(
       (b) => b.supplierName.trim().toLowerCase() === retSupplier.trim().toLowerCase(),
     );
@@ -4051,11 +4131,36 @@ export function SecondaryViews({
       0,
     );
 
+    const customerOptions = Array.from(
+      new Set([
+        ...snapshot.customers.map((c) => c.name),
+        ...snapshot.salesBills.map((b) => b.customerName),
+      ]),
+    ).filter(Boolean);
+    const activeSretCustomer = sretCustomer || customerOptions[0] || '';
+    const customerBills = snapshot.salesBills.filter(
+      (b) => b.customerName.trim().toLowerCase() === activeSretCustomer.trim().toLowerCase(),
+    );
+    const selectedRefSalesBill = sretSalesBillId
+      ? customerBills.find((b) => b.id === sretSalesBillId)
+      : undefined;
+    const sretCalculatedTotal = sretItems.reduce(
+      (sum, row) => sum + Math.max(0, Number(row.amountInr) || 0),
+      0,
+    );
+
     const updateRetItem = (
       id: string,
       updater: (row: PurchaseReturnDraftItem) => PurchaseReturnDraftItem,
     ) => {
       setRetItems((prev) => prev.map((row) => (row.id === id ? updater(row) : row)));
+    };
+
+    const updateSretItem = (
+      id: string,
+      updater: (row: PurchaseReturnDraftItem) => PurchaseReturnDraftItem,
+    ) => {
+      setSretItems((prev) => prev.map((row) => (row.id === id ? updater(row) : row)));
     };
 
     const loadItemsFromBill = (bill: PurchaseBill) => {
@@ -4086,15 +4191,85 @@ export function SecondaryViews({
       }
     };
 
+    const loadItemsFromSalesBill = (bill: SalesBill) => {
+      const sourceLines =
+        Array.isArray(bill.items) && bill.items.length > 0
+          ? bill.items.filter((it) => it.qty > 0 || it.amountInr > 0)
+          : [];
+      if (sourceLines.length === 0) return;
+      const mapped: PurchaseReturnDraftItem[] = sourceLines.map((it, idx) => {
+        const matched =
+          (it.itemCode && findBillableByCode(it.itemCode)) ||
+          billableOptions.find(
+            (v) => v.itemName.toLowerCase() === it.itemName.toLowerCase(),
+          ) ||
+          billableOptions[0];
+        return {
+          id: `sret-load-${Date.now()}-${idx}`,
+          itemCode: matched?.itemCode || it.itemCode || 'SL-001',
+          qty: String(it.qty),
+          unit: it.unit,
+          amountInr: String(it.amountInr),
+          reason: '',
+        };
+      });
+      setSretItems(mapped);
+      if (bill.branchName) {
+        setSretBranch(bill.branchName);
+      }
+    };
+
     return (
       <div className="space-y-5">
-        <div>
-          <h1 className="text-[20px] font-bold text-[#0F172A]">Supplier Purchase Returns</h1>
-          <p className="text-[13px] text-[#64748B]">
-            Return damaged, mismatched, or excess marble &amp; tiles to suppliers. Every return automatically reduces matching Purchase Bills, Supplier payables, Branch stock, and Dashboard KPIs.
-          </p>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h1 className="text-[20px] font-bold text-[#0F172A]">
+              {returnTab === 'purchase'
+                ? 'Supplier Purchase Returns'
+                : 'Customer Sales Bills Returns'}
+            </h1>
+            <p className="text-[13px] text-[#64748B]">
+              {returnTab === 'purchase'
+                ? 'Return damaged, mismatched, or excess marble & tiles to suppliers. Every return automatically reduces matching Purchase Bills, Supplier payables, Branch stock, and Dashboard KPIs.'
+                : 'Accept returned marble, granite slabs & tiles from customers. Every return automatically deducts matching Sales Bills, updates customer balances, and restores branch stock.'}
+            </p>
+          </div>
+
+          <div
+            role="tablist"
+            aria-label="Return type selector"
+            className="inline-flex rounded-xl border border-[#E2E8F0] bg-white p-1 self-start sm:self-auto shrink-0"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={returnTab === 'purchase'}
+              onClick={() => setReturnTab('purchase')}
+              className={`px-3.5 h-8 rounded-lg text-[12.5px] font-semibold transition-colors whitespace-nowrap ${
+                returnTab === 'purchase'
+                  ? 'bg-[#2563EB] text-white shadow-xs'
+                  : 'text-[#475569] hover:text-[#0F172A] hover:bg-slate-50'
+              }`}
+            >
+              Purchase Returns ({allReturns.length})
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={returnTab === 'sales'}
+              onClick={() => setReturnTab('sales')}
+              className={`px-3.5 h-8 rounded-lg text-[12.5px] font-semibold transition-colors whitespace-nowrap ${
+                returnTab === 'sales'
+                  ? 'bg-[#2563EB] text-white shadow-xs'
+                  : 'text-[#475569] hover:text-[#0F172A] hover:bg-slate-50'
+              }`}
+            >
+              Sales Bills Returns ({allSalesReturns.length})
+            </button>
+          </div>
         </div>
 
+        {returnTab === 'purchase' ? (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
           <form
             onSubmit={async (e) => {
@@ -4754,6 +4929,668 @@ export function SecondaryViews({
             })()}
           </div>
         </div>
+        ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              setSretError(null);
+              if (!sretNo.trim()) {
+                setSretError('Please enter a Return No.');
+                return;
+              }
+              if (!activeSretCustomer.trim() || !sretBranch.trim()) {
+                setSretError('Customer and Branch are required.');
+                return;
+              }
+              if (sretReason === 'Other' && !sretNotes.trim()) {
+                setSretError('Please enter return reason details in Notes.');
+                return;
+              }
+              if (sretItems.length === 0) {
+                setSretError('Add at least one product item to record a sales return.');
+                return;
+              }
+              const parsedItems = sretItems.map((row) => ({
+                itemCode: row.itemCode,
+                qty: Number(row.qty),
+                unit: row.unit,
+                amountInr: Number(row.amountInr),
+                reason: row.reason.trim() || undefined,
+              }));
+              if (
+                parsedItems.some(
+                  (it) => !it.itemCode || !it.qty || it.qty <= 0 || it.amountInr < 0,
+                )
+              ) {
+                setSretError(
+                  'Every returned item card must have a product, positive qty, and valid amount.',
+                );
+                return;
+              }
+              setSavingSalesReturn(true);
+              try {
+                await onCreateSalesReturn({
+                  returnNo: buildFormattedSalesReturnNo(sretNo, sretDate),
+                  customerName: activeSretCustomer,
+                  branchName: sretBranch,
+                  salesBillId: sretSalesBillId || undefined,
+                  reason: sretReason,
+                  notes: sretNotes.trim() || undefined,
+                  dateLabel: formatIsoDateToLabel(sretDate),
+                  dateIso: sretDate,
+                  items: parsedItems,
+                });
+                const numericSuffix = Number(extractSalesReturnNoSuffix(sretNo));
+                if (!Number.isNaN(numericSuffix) && Number.isFinite(numericSuffix)) {
+                  setSretNo(String(numericSuffix + 1));
+                } else {
+                  setSretNo('');
+                }
+                setSretSalesBillId('');
+                setSretNotes('');
+                setSretItems([createDefaultReturnItem(0)]);
+              } catch (err) {
+                setSretError(
+                  err instanceof Error ? err.message : 'Unable to record sales bill return.',
+                );
+              } finally {
+                setSavingSalesReturn(false);
+              }
+            }}
+            className="bg-white border border-[#E5E9F0] rounded-xl p-5 space-y-3.5 h-fit"
+          >
+            <h2 className="text-[14px] font-semibold text-[#0F172A] flex items-center gap-2">
+              <Undo2 className="w-4 h-4 text-[#2563EB]" />
+              <span>Record Sales Bill Return</span>
+            </h2>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                  Return No
+                </label>
+                <div className="flex items-stretch rounded-lg border border-[#E2E8F0] overflow-hidden focus-within:border-blue-500 bg-white">
+                  <span className="px-2 inline-flex items-center bg-[#F8FAFC] border-r border-[#E2E8F0] text-[11px] font-mono font-semibold text-[#2563EB] select-none whitespace-nowrap">
+                    {getSalesReturnNoPrefixFromIso(sretDate)}
+                  </span>
+                  <input
+                    type="text"
+                    value={sretNo}
+                    onChange={(e) => setSretNo(e.target.value)}
+                    placeholder="3101"
+                    className="w-full h-9 px-2 text-[12.5px] font-mono text-[#0F172A] focus:outline-none"
+                    required
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                  Return Date
+                </label>
+                <input
+                  type="date"
+                  value={sretDate}
+                  onChange={(e) => setSretDate(e.target.value)}
+                  className="w-full h-9 px-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums"
+                  required
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                Customer
+              </label>
+              <select
+                value={activeSretCustomer}
+                onChange={(e) => {
+                  setSretCustomer(e.target.value);
+                  setSretSalesBillId('');
+                }}
+                className="w-full h-9 px-2.5 text-[12.5px] rounded-lg border border-[#E2E8F0] bg-white"
+              >
+                {customerOptions.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                Receiving Branch / Location
+              </label>
+              <select
+                value={sretBranch}
+                onChange={(e) => setSretBranch(e.target.value)}
+                className="w-full h-9 px-2.5 text-[12.5px] rounded-lg border border-[#E2E8F0] bg-white"
+              >
+                {snapshot.locations.map((l) => (
+                  <option key={l.id} value={l.name}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[11px] font-medium text-[#64748B]">
+                  Sales Bill to Deduct
+                </label>
+                {selectedRefSalesBill && (
+                  <button
+                    type="button"
+                    onClick={() => loadItemsFromSalesBill(selectedRefSalesBill)}
+                    className="text-[11px] font-semibold text-[#2563EB] hover:underline"
+                  >
+                    Load Bill Items
+                  </button>
+                )}
+              </div>
+              <select
+                value={sretSalesBillId}
+                onChange={(e) => setSretSalesBillId(e.target.value)}
+                className="w-full h-9 px-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white"
+              >
+                <option value="">
+                  Auto-match across {activeSretCustomer || 'customer'} sales bills (
+                  {customerBills.length})
+                </option>
+                {customerBills.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.invoiceNo} · {b.branchName} · ₹{' '}
+                    {getSalesBillTotal(b).toLocaleString('en-IN')} ({getSalesBillComputedStatus(b)})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-2">
+              <div>
+                <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                  Reason for Return
+                </label>
+                <select
+                  value={sretReason}
+                  onChange={(e) => setSretReason(e.target.value)}
+                  className="w-full h-9 px-2.5 text-[12.5px] rounded-lg border border-[#E2E8F0] bg-white"
+                >
+                  {SALES_RETURN_REASONS.map((r) => (
+                    <option key={r} value={r}>
+                      {r}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                  Notes / Inspection Remarks
+                </label>
+                <textarea
+                  rows={2}
+                  value={sretNotes}
+                  onChange={(e) => setSretNotes(e.target.value)}
+                  placeholder="Describe breakage, unused site balance, or credit memo remarks..."
+                  className="w-full px-2.5 py-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-2.5 pt-1">
+              <div className="flex items-center justify-between">
+                <span className="text-[11.5px] font-semibold text-[#0F172A]">
+                  Return Items ({sretItems.length})
+                </span>
+                <span className="text-[11px] text-[#64748B]">Restocks into branch inventory</span>
+              </div>
+
+              {sretItems.map((row, idx) => (
+                <div
+                  key={row.id}
+                  className="rounded-lg border border-[#E2E8F0] bg-[#FAFBFD] p-3 space-y-2.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-semibold text-[#2563EB] uppercase tracking-wide">
+                      Item #{idx + 1}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={sretItems.length <= 1}
+                      aria-label={`Delete sales return item ${idx + 1}`}
+                      onClick={() =>
+                        setSretItems((prev) =>
+                          prev.length > 1 ? prev.filter((item) => item.id !== row.id) : prev,
+                        )
+                      }
+                      className="p-1 rounded-md text-[#64748B] hover:text-[#DC2626] hover:bg-rose-50 transition-colors disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-[#64748B]"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="text-[11px] font-medium text-[#64748B]">
+                        Product &amp; Size
+                      </label>
+                      {row.itemCode && (
+                        <span className="text-[10.5px] font-mono font-semibold text-[#2563EB]">
+                          {row.itemCode}
+                        </span>
+                      )}
+                    </div>
+                    <select
+                      value={row.itemCode}
+                      onChange={(e) => {
+                        const nextCode = e.target.value;
+                        const found = findBillableByCode(nextCode);
+                        updateSretItem(row.id, (prev) => {
+                          const qtyNum = Number(prev.qty) || 0;
+                          return {
+                            ...prev,
+                            itemCode: nextCode,
+                            unit: found ? found.unit : prev.unit,
+                            amountInr: found
+                              ? String(Math.round(qtyNum * found.unitPriceInr))
+                              : prev.amountInr,
+                          };
+                        });
+                      }}
+                      className="w-full h-9 px-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white"
+                    >
+                      {slabBillableOptions.length > 0 && (
+                        <optgroup label="Slabs (Slab SKU)">
+                          {slabBillableOptions.map((o) => (
+                            <option key={o.id} value={o.itemCode}>
+                              {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {productBillableOptions.length > 0 && (
+                        <optgroup label="Products (Product SKU)">
+                          {productBillableOptions.map((o) => (
+                            <option key={o.id} value={o.itemCode}>
+                              {o.itemCode} — {o.itemName} ({o.dimensions}) · {o.unit}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                        Qty
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={row.qty}
+                        onChange={(e) => {
+                          const nextQty = e.target.value;
+                          const found = findBillableByCode(row.itemCode);
+                          updateSretItem(row.id, (prev) => ({
+                            ...prev,
+                            qty: nextQty,
+                            amountInr:
+                              found && Number(nextQty) > 0
+                                ? String(Math.round(Number(nextQty) * found.unitPriceInr))
+                                : prev.amountInr,
+                          }));
+                        }}
+                        className="w-full h-9 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                        Unit
+                      </label>
+                      <select
+                        value={row.unit}
+                        onChange={(e) =>
+                          updateSretItem(row.id, (prev) => ({
+                            ...prev,
+                            unit: e.target.value as UnitType,
+                          }))
+                        }
+                        className="w-full h-9 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white"
+                      >
+                        {SHOP_UNITS.map((u) => (
+                          <option key={u} value={u}>
+                            {u}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                        Amount (₹)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={row.amountInr}
+                        onChange={(e) =>
+                          updateSretItem(row.id, (prev) => ({
+                            ...prev,
+                            amountInr: e.target.value,
+                          }))
+                        }
+                        className="w-full h-9 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <input
+                      type="text"
+                      value={row.reason}
+                      onChange={(e) =>
+                        updateSretItem(row.id, (prev) => ({
+                          ...prev,
+                          reason: e.target.value,
+                        }))
+                      }
+                      placeholder="Optional item note (e.g., unused site lot, corner chip)"
+                      className="w-full h-8 px-2.5 text-[11.5px] rounded-lg border border-[#E2E8F0] bg-white"
+                    />
+                  </div>
+                </div>
+              ))}
+
+              <button
+                type="button"
+                onClick={() =>
+                  setSretItems((prev) => [...prev, createDefaultReturnItem(prev.length)])
+                }
+                className="w-full h-9 rounded-lg border border-dashed border-[#2563EB]/50 bg-[#EEF4FF]/50 hover:bg-[#EEF4FF] text-[#1D63ED] text-[12px] font-semibold inline-flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Add Another Item</span>
+              </button>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-medium text-[#64748B] mb-1">
+                Total Return Credit (₹) <span className="text-[#2563EB] font-normal">· Auto</span>
+              </label>
+              <input
+                type="text"
+                readOnly
+                value={`₹ ${sretCalculatedTotal.toLocaleString('en-IN')}`}
+                className="w-full h-9 px-3 text-[13px] font-bold text-[#0F172A] rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] tabular-nums"
+              />
+            </div>
+
+            {sretError && (
+              <div className="px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-[12px] text-[#DC2626]">
+                {sretError}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={savingSalesReturn}
+              className="w-full h-9 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[12.5px] font-semibold disabled:opacity-60"
+            >
+              {savingSalesReturn
+                ? 'Recording Sales Return...'
+                : 'Submit Return & Deduct Sales Bills'}
+            </button>
+          </form>
+
+          <div className="lg:col-span-2 bg-white border border-[#E5E9F0] rounded-xl p-5 space-y-3.5">
+            {(() => {
+              const sretLocationOptions = Array.from(
+                new Set([
+                  ...snapshot.locations.map((l) => l.name),
+                  ...allSalesReturns.map((r) => r.branchName),
+                ]),
+              ).filter(Boolean);
+
+              const sretCustomerOptions = Array.from(
+                new Set([
+                  ...customerOptions,
+                  ...allSalesReturns.map((r) => r.customerName),
+                ]),
+              ).filter(Boolean);
+
+              const sq = sretSearch.trim().toLowerCase();
+              const filteredSalesReturns = allSalesReturns.filter((r) => {
+                if (sretLocationFilter !== 'All' && r.branchName !== sretLocationFilter) {
+                  return false;
+                }
+                if (sretCustomerFilter !== 'All' && r.customerName !== sretCustomerFilter) {
+                  return false;
+                }
+                const iso = parseDateLabelToIso(r.dateLabel, r.dateIso);
+                if (sretDateFrom && iso < sretDateFrom) return false;
+                if (sretDateTo && iso > sretDateTo) return false;
+                if (sq) {
+                  const billsJoined = (r.affectedBills || []).join(' ').toLowerCase();
+                  const matchesText =
+                    r.returnNo.toLowerCase().includes(sq) ||
+                    r.customerName.toLowerCase().includes(sq) ||
+                    r.branchName.toLowerCase().includes(sq) ||
+                    r.reason.toLowerCase().includes(sq) ||
+                    r.itemSummary.toLowerCase().includes(sq) ||
+                    billsJoined.includes(sq);
+                  if (!matchesText) return false;
+                }
+                return true;
+              });
+
+              const hasSretFilters =
+                Boolean(sretSearch.trim()) ||
+                Boolean(sretDateFrom) ||
+                Boolean(sretDateTo) ||
+                sretLocationFilter !== 'All' ||
+                sretCustomerFilter !== 'All';
+
+              const filteredSalesTotalAmt = filteredSalesReturns.reduce(
+                (sum, r) => sum + (Number(r.totalInr) || 0),
+                0,
+              );
+
+              return (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h2 className="text-[14px] font-semibold text-[#0F172A]">
+                      Sales Returns Ledger (
+                      {hasSretFilters
+                        ? `${filteredSalesReturns.length} of ${allSalesReturns.length}`
+                        : allSalesReturns.length}
+                      )
+                    </h2>
+                    <div className="flex items-center gap-3">
+                      <span className="text-[12px] text-[#64748B] tabular-nums">
+                        Total Credited:{' '}
+                        <strong className="text-[#0F172A]">
+                          ₹ {filteredSalesTotalAmt.toLocaleString('en-IN')}
+                        </strong>
+                      </span>
+                      {hasSretFilters && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSretSearch('');
+                            setSretDateFrom('');
+                            setSretDateTo('');
+                            setSretLocationFilter('All');
+                            setSretCustomerFilter('All');
+                          }}
+                          className="h-7 px-2.5 rounded-lg border border-[#E2E8F0] bg-[#FAFBFD] hover:bg-slate-100 text-[11.5px] font-medium text-[#475569] inline-flex items-center gap-1 transition-colors"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                          <span>Reset</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Filters: Search, Date Range, Location, Customer */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-12 gap-2.5 p-3 rounded-lg bg-[#FAFBFD] border border-[#EBF0F6]">
+                    <div className="xl:col-span-4 relative">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Return No / Invoice / Item
+                      </label>
+                      <div className="relative">
+                        <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          type="text"
+                          value={sretSearch}
+                          onChange={(e) => setSretSearch(e.target.value)}
+                          placeholder="Search return no, INV, reason..."
+                          className="w-full h-8.5 pl-8 pr-2.5 text-[12px] rounded-lg border border-[#E2E8F0] bg-white focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="xl:col-span-4">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Date Range
+                      </label>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <input
+                          type="date"
+                          aria-label="Sales return date from"
+                          value={sretDateFrom}
+                          onChange={(e) => setSretDateFrom(e.target.value)}
+                          className="w-full h-8.5 px-2 text-[11.5px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums focus:outline-none focus:border-blue-500"
+                        />
+                        <input
+                          type="date"
+                          aria-label="Sales return date to"
+                          value={sretDateTo}
+                          onChange={(e) => setSretDateTo(e.target.value)}
+                          className="w-full h-8.5 px-2 text-[11.5px] rounded-lg border border-[#E2E8F0] bg-white tabular-nums focus:outline-none focus:border-blue-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="xl:col-span-2">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Location
+                      </label>
+                      <select
+                        aria-label="Filter sales returns by location"
+                        value={sretLocationFilter}
+                        onChange={(e) => setSretLocationFilter(e.target.value)}
+                        className="w-full h-8.5 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white text-[#0F172A] focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="All">All Locations</option>
+                        {sretLocationOptions.map((locName) => (
+                          <option key={locName} value={locName}>
+                            {locName}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="xl:col-span-2">
+                      <label className="block text-[10.5px] font-medium text-[#64748B] mb-1">
+                        Customer
+                      </label>
+                      <select
+                        aria-label="Filter sales returns by customer"
+                        value={sretCustomerFilter}
+                        onChange={(e) => setSretCustomerFilter(e.target.value)}
+                        className="w-full h-8.5 px-2 text-[12px] rounded-lg border border-[#E2E8F0] bg-white text-[#0F172A] focus:outline-none focus:border-blue-500"
+                      >
+                        <option value="All">All Customers</option>
+                        {sretCustomerOptions.map((custNameOption) => (
+                          <option key={custNameOption} value={custNameOption}>
+                            {custNameOption}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse min-w-[760px]">
+                      <thead>
+                        <tr className="border-b border-[#E5E9F0] text-[11px] font-medium text-[#64748B]">
+                          <th className="py-2 pr-2">Return No</th>
+                          <th className="py-2 px-2">Date</th>
+                          <th className="py-2 px-2">Customer</th>
+                          <th className="py-2 px-2">Branch</th>
+                          <th className="py-2 px-2">Items &amp; Reason</th>
+                          <th className="py-2 px-2">Sales Bill Reduced</th>
+                          <th className="py-2 px-2 text-right">Amount</th>
+                          <th className="py-2 pl-2 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#F1F5F9] text-[12px]">
+                        {filteredSalesReturns.length === 0 ? (
+                          <tr>
+                            <td colSpan={8} className="py-10 text-center text-[#64748B]">
+                              {allSalesReturns.length === 0
+                                ? 'No customer sales returns recorded yet. Use the form on the left to accept returned stock and automatically deduct Sales Bills.'
+                                : 'No sales returns match the selected filters.'}
+                            </td>
+                          </tr>
+                        ) : (
+                          filteredSalesReturns.map((r) => (
+                            <tr key={r.id} className="hover:bg-slate-50/80">
+                              <td className="py-2.5 pr-2 font-mono font-medium whitespace-nowrap text-[#0F172A]">
+                                {r.returnNo}
+                              </td>
+                              <td className="py-2.5 px-2 text-[#64748B] whitespace-nowrap">
+                                {r.dateLabel}
+                              </td>
+                              <td className="py-2.5 px-2 text-[#0F172A] font-medium">
+                                {r.customerName}
+                              </td>
+                              <td className="py-2.5 px-2 text-[#475569] whitespace-nowrap">
+                                {r.branchName}
+                              </td>
+                              <td className="py-2.5 px-2">
+                                <div className="font-medium text-[#0F172A]">
+                                  {r.itemSummary} ({r.qty.toLocaleString('en-IN')} {r.unit})
+                                </div>
+                                <div className="text-[11px] text-[#64748B]">
+                                  {r.reason}
+                                  {r.notes ? ` · ${r.notes}` : ''}
+                                </div>
+                              </td>
+                              <td className="py-2.5 px-2 font-mono text-[11.5px] text-[#2563EB] whitespace-nowrap">
+                                {r.affectedBills && r.affectedBills.length > 0
+                                  ? r.affectedBills.join(', ')
+                                  : r.salesBillNo || '—'}
+                              </td>
+                              <td className="py-2.5 px-2 text-right font-semibold text-[#DC2626] tabular-nums whitespace-nowrap">
+                                -₹ {r.totalInr.toLocaleString('en-IN')}
+                              </td>
+                              <td className="py-2.5 pl-2 text-right whitespace-nowrap">
+                                <button
+                                  type="button"
+                                  onClick={() => setViewSalesReturn(r)}
+                                  className="h-7 px-2.5 rounded-lg border border-[#E2E8F0] bg-white hover:bg-[#EEF4FF] hover:border-blue-200 hover:text-[#1D63ED] text-[#334155] text-[11.5px] font-medium inline-flex items-center gap-1.5 transition-colors"
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                  <span>View</span>
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+        )}
       </div>
     );
   }
@@ -6494,6 +7331,140 @@ export function SecondaryViews({
               <button
                 type="button"
                 onClick={() => setViewReturn(null)}
+                className="h-9 px-4 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[12.5px] font-semibold"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {viewSalesReturn && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-slate-900/35 backdrop-blur-[1px]"
+            onClick={() => setViewSalesReturn(null)}
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="relative z-10 w-full max-w-2xl bg-white rounded-xl border border-[#E5E9F0] shadow-xl flex flex-col max-h-[90vh] overflow-hidden"
+          >
+            <div className="px-6 py-4 border-b border-[#E5E9F0] flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2 text-[11.5px]">
+                  <span className="font-mono font-semibold text-[#2563EB]">
+                    {viewSalesReturn.returnNo}
+                  </span>
+                  <span className="text-[#CBD5E1]">·</span>
+                  <span className="text-[#64748B]">{viewSalesReturn.dateLabel}</span>
+                  <span className="text-[#CBD5E1]">·</span>
+                  <span className="font-semibold text-[#16A34A]">{viewSalesReturn.status}</span>
+                </div>
+                <h3 className="text-[17px] font-bold text-[#0F172A] mt-0.5 truncate">
+                  {viewSalesReturn.customerName}
+                </h3>
+                <p className="text-[12px] text-[#64748B]">
+                  Returned To Branch: {viewSalesReturn.branchName}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewSalesReturn(null)}
+                aria-label="Close sales return details modal"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto flex-1 space-y-4">
+              <div className="rounded-xl border border-[#E5E9F0] bg-[#FAFBFD] p-3.5 grid grid-cols-1 sm:grid-cols-2 gap-3 text-[12px]">
+                <div>
+                  <div className="text-[11px] font-medium text-[#64748B]">Return Reason</div>
+                  <div className="font-semibold text-[#0F172A] mt-0.5">
+                    {viewSalesReturn.reason}
+                  </div>
+                  {viewSalesReturn.notes && (
+                    <div className="text-[11.5px] text-[#475569] mt-0.5">
+                      {viewSalesReturn.notes}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <div className="text-[11px] font-medium text-[#64748B]">
+                    Sales Bills Reduced
+                  </div>
+                  <div className="font-mono font-semibold text-[#2563EB] mt-0.5">
+                    {viewSalesReturn.affectedBills && viewSalesReturn.affectedBills.length > 0
+                      ? viewSalesReturn.affectedBills.join(', ')
+                      : viewSalesReturn.salesBillNo || 'No matching sales bill reduced'}
+                  </div>
+                </div>
+              </div>
+
+              <div className="overflow-x-auto border border-[#E5E9F0] rounded-xl">
+                <table className="w-full text-left border-collapse min-w-[540px]">
+                  <thead>
+                    <tr className="bg-[#FAFBFD] border-b border-[#E5E9F0] text-[11px] font-medium text-[#64748B]">
+                      <th className="py-2.5 pl-4 pr-2">#</th>
+                      <th className="py-2.5 px-2">Product &amp; Size</th>
+                      <th className="py-2.5 px-2 text-right">Qty</th>
+                      <th className="py-2.5 px-2">Unit</th>
+                      <th className="py-2.5 px-2">Item Note</th>
+                      <th className="py-2.5 pl-2 pr-4 text-right">Credit Amount (₹)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#F1F5F9] text-[12.5px]">
+                    {viewSalesReturn.items.map((it, idx) => (
+                      <tr key={it.id} className="hover:bg-slate-50/70">
+                        <td className="py-3 pl-4 pr-2 text-[#64748B] font-mono text-[11.5px]">
+                          {idx + 1}
+                        </td>
+                        <td className="py-3 px-2">
+                          <div className="font-semibold text-[#0F172A]">{it.itemName}</div>
+                          <div className="text-[11px] text-[#64748B] font-mono">
+                            {it.dimensions}
+                            {it.itemCode ? ` · ${it.itemCode}` : ''}
+                          </div>
+                        </td>
+                        <td className="py-3 px-2 text-right font-medium tabular-nums whitespace-nowrap">
+                          {it.qty.toLocaleString('en-IN')}
+                        </td>
+                        <td className="py-3 px-2 text-[#2563EB] font-medium whitespace-nowrap">
+                          {it.unit}
+                        </td>
+                        <td className="py-3 px-2 text-[11.5px] text-[#64748B]">
+                          {it.reason || '—'}
+                        </td>
+                        <td className="py-3 pl-2 pr-4 text-right font-semibold text-[#DC2626] tabular-nums whitespace-nowrap">
+                          -₹ {it.amountInr.toLocaleString('en-IN')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-[#F8FAFC] border-t border-[#E5E9F0]">
+                      <td
+                        colSpan={5}
+                        className="py-3 pl-4 pr-2 text-[12.5px] font-semibold text-[#0F172A]"
+                      >
+                        Total Credited ({viewSalesReturn.items.length} item
+                        {viewSalesReturn.items.length === 1 ? '' : 's'})
+                      </td>
+                      <td className="py-3 pl-2 pr-4 text-right text-[14px] font-bold text-[#DC2626] tabular-nums whitespace-nowrap">
+                        -₹ {viewSalesReturn.totalInr.toLocaleString('en-IN')}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+
+            <div className="px-6 py-3.5 border-t border-[#E5E9F0] bg-[#FAFBFD] flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() => setViewSalesReturn(null)}
                 className="h-9 px-4 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-[12.5px] font-semibold"
               >
                 Close

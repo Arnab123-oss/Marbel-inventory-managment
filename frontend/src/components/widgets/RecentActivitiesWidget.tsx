@@ -5,6 +5,7 @@ import type {
   PurchaseBill,
   PurchaseReturn,
   SalesBill,
+  SalesReturn,
   StockTransfer,
 } from '../../types/inventory';
 import {
@@ -17,6 +18,7 @@ interface RecentActivitiesWidgetProps {
   salesBills: SalesBill[];
   purchaseBills: PurchaseBill[];
   purchaseReturns?: PurchaseReturn[];
+  salesReturns?: SalesReturn[];
   transfers: StockTransfer[];
   onNavigate: (section: NavSection) => void;
 }
@@ -71,6 +73,7 @@ export function RecentActivitiesWidget({
   salesBills,
   purchaseBills,
   purchaseReturns = [],
+  salesReturns = [],
   transfers,
   onNavigate,
 }: RecentActivitiesWidgetProps) {
@@ -124,6 +127,19 @@ export function RecentActivitiesWidget({
       });
     }
 
+    for (const sret of salesReturns) {
+      list.push({
+        id: `sreturn-${sret.id}`,
+        kind: 'return',
+        title: `Sales return #${sret.returnNo}`,
+        subtitle: `${sret.customerName} · ${sret.branchName} (${sret.reason})`,
+        amountLabel: `-${formatInrExact(sret.totalInr)}`,
+        dateLabel: sret.dateLabel,
+        sortKey: `${toSortableDate(sret.dateLabel, sret.dateIso)}-5-${sret.id}`,
+        targetSection: 'returns',
+      });
+    }
+
     for (const trf of transfers.slice(0, 4)) {
       list.push({
         id: `trf-${trf.id}`,
@@ -138,7 +154,7 @@ export function RecentActivitiesWidget({
     }
 
     return list.sort((a, b) => b.sortKey.localeCompare(a.sortKey)).slice(0, 5);
-  }, [salesBills, purchaseBills, purchaseReturns, transfers]);
+  }, [salesBills, purchaseBills, purchaseReturns, salesReturns, transfers]);
 
   if (activities.length === 0) {
     return (

@@ -58,7 +58,6 @@ export interface UserProfile {
   initials: string;
   role: string;
   facilityScope: string;
-  firebaseUid?: string;
   enabled?: boolean;
 }
 
@@ -320,6 +319,45 @@ export interface PurchaseReturn {
   items: PurchaseReturnItem[];
 }
 
+export interface SalesReturnItem {
+  id: string;
+  productId?: string;
+  slabIds?: string[];
+  itemCode: string;
+  itemName: string;
+  dimensions: string;
+  qty: number;
+  unit: UnitType;
+  amountInr: number;
+  amountPaise?: number;
+  reason?: string;
+}
+
+export interface SalesReturn {
+  id: string;
+  companyId?: string;
+  branchId?: string;
+  customerId?: string;
+  createdBy?: string;
+  returnNo: string;
+  customerName: string;
+  branchName: string;
+  salesBillId?: string;
+  salesBillNo?: string;
+  affectedBills?: string[];
+  reason: string;
+  notes?: string;
+  itemSummary: string;
+  qty: number;
+  unit: UnitType;
+  totalInr: number;
+  totalPaise?: number;
+  status: 'Completed' | 'Adjusted';
+  dateLabel: string;
+  dateIso?: string;
+  items: SalesReturnItem[];
+}
+
 export type SalesPaymentStatus = 'Paid' | 'Partially Paid' | 'Due';
 
 export interface SalesBillItem {
@@ -505,6 +543,7 @@ export interface InventorySnapshot {
   purchaseBills: PurchaseBill[];
   purchaseReturns?: PurchaseReturn[];
   salesBills: SalesBill[];
+  salesReturns?: SalesReturn[];
   customers: CustomerRecord[];
   suppliers: SupplierRecord[];
   alerts: InventoryAlert[];

@@ -13,6 +13,7 @@ import productRoutes from './routes/productRoutes.ts';
 import purchaseBillRoutes from './routes/purchaseBillRoutes.ts';
 import purchaseReturnRoutes from './routes/purchaseReturnRoutes.ts';
 import salesBillRoutes from './routes/salesBillRoutes.ts';
+import salesReturnRoutes from './routes/salesReturnRoutes.ts';
 import slabRoutes from './routes/slabRoutes.ts';
 import supplierRoutes from './routes/supplierRoutes.ts';
 import transferRoutes from './routes/transferRoutes.ts';
@@ -68,6 +69,7 @@ export async function createApp(): Promise<express.Express> {
   app.use('/api/purchase-bills', purchaseBillRoutes);
   app.use('/api/returns', purchaseReturnRoutes);
   app.use('/api/sales-bills', salesBillRoutes);
+  app.use('/api/sales-returns', salesReturnRoutes);
   app.use('/api/transfers', transferRoutes);
   app.use('/api/customers', customerRoutes);
   app.use('/api/suppliers', supplierRoutes);

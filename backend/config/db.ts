@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import mongoose from 'mongoose';
-import {getFirebaseStatus, initFirebase, type FirebaseStatus} from './firebase.ts';
+import {getImageKitStatus, type ImageKitStatus} from '../services/imagekitService.ts';
 
 export const DATA_DIR = fs.existsSync(path.resolve(process.cwd(), 'data'))
   ? path.resolve(process.cwd(), 'data')
@@ -16,7 +16,7 @@ export interface DbConnectionResult {
   driver: 'mongodb-atlas' | 'local-json-ledger';
   mongoConnected: boolean;
   mongoHost: string | null;
-  firebase: FirebaseStatus;
+  imagekit: ImageKitStatus;
   storePath: string;
 }
 
@@ -29,8 +29,7 @@ export async function connectDB(): Promise<DbConnectionResult> {
     fs.mkdirSync(DATA_DIR, {recursive: true});
   }
 
-  // Initialize optional Firebase Auth + Firebase Storage
-  const firebaseStatus = initFirebase();
+  const imagekitStatus = getImageKitStatus();
 
   const mongoUri =
     process.env.MONGODB_URI?.trim() ||
@@ -51,7 +50,7 @@ export async function connectDB(): Promise<DbConnectionResult> {
         driver: 'mongodb-atlas',
         mongoConnected: true,
         mongoHost: host,
-        firebase: firebaseStatus,
+        imagekit: imagekitStatus,
         storePath: STORE_PATH,
       };
     } catch (error) {
@@ -71,7 +70,7 @@ export async function connectDB(): Promise<DbConnectionResult> {
     driver: 'local-json-ledger',
     mongoConnected: false,
     mongoHost: null,
-    firebase: getFirebaseStatus(),
+    imagekit: imagekitStatus,
     storePath: STORE_PATH,
   };
 }
@@ -80,7 +79,7 @@ export function getDbHealth(): {
   driver: 'mongodb-atlas' | 'local-json-ledger';
   mongooseReadyState: number;
   mongoHost: string | null;
-  firebase: FirebaseStatus;
+  imagekit: ImageKitStatus;
   localStoreExists: boolean;
 } {
   const connected = isMongoConnected();
@@ -88,7 +87,7 @@ export function getDbHealth(): {
     driver: connected ? 'mongodb-atlas' : 'local-json-ledger',
     mongooseReadyState: mongoose.connection.readyState,
     mongoHost: connected ? mongoose.connection.host || null : null,
-    firebase: getFirebaseStatus(),
+    imagekit: getImageKitStatus(),
     localStoreExists: fs.existsSync(STORE_PATH),
   };
 }

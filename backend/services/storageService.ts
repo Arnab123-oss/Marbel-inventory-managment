@@ -1,15 +1,16 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import {getStorageBucket, isFirebaseStorageReady} from '../config/firebase.ts';
+import {isImageKitReady, uploadToImageKit} from './imagekitService.ts';
 
 export type ImageUploadFolder = 'products' | 'slabs';
 
 export interface UploadedImageResult {
   url: string;
-  provider: 'firebase-storage' | 'inline-fallback';
+  provider: 'imagekit' | 'inline-fallback';
   path: string;
   mimeType: string;
   sizeBytes: number;
+  fileId?: string;
 }
 
 const ALLOWED_IMAGE_MIME = new Set([
@@ -61,31 +62,27 @@ export async function uploadImageToStorage(
 
   const safeFolder: ImageUploadFolder = folder === 'slabs' ? 'slabs' : 'products';
   const fileName = `${Date.now()}-${crypto.randomUUID().slice(0, 8)}${safeExt}`;
+  const folderPath = `/stonepulse/${safeFolder}`;
   const objectPath = `stonepulse/${safeFolder}/${fileName}`;
 
-  if (isFirebaseStorageReady()) {
-    const bucket = getStorageBucket();
-    if (bucket) {
-      try {
-        const gcsFile = bucket.file(objectPath);
-        await gcsFile.save(file.buffer, {
-          contentType: file.mimetype,
-          metadata: {
-            cacheControl: 'public, max-age=31536000',
-          },
-        });
-        await gcsFile.makePublic().catch(() => undefined);
-        const publicUrl = `https://storage.googleapis.com/${bucket.name}/${objectPath}`;
-        return {
-          url: publicUrl,
-          provider: 'firebase-storage',
-          path: objectPath,
-          mimeType: file.mimetype,
-          sizeBytes: file.buffer.length,
-        };
-      } catch (err) {
-        console.warn('Firebase Storage upload fell back to inline image:', err);
-      }
+  if (isImageKitReady()) {
+    try {
+      const uploaded = await uploadToImageKit({
+        buffer: file.buffer,
+        fileName,
+        mimeType: file.mimetype,
+        folder: folderPath,
+      });
+      return {
+        url: uploaded.url,
+        provider: 'imagekit',
+        path: uploaded.filePath || objectPath,
+        mimeType: file.mimetype,
+        sizeBytes: file.buffer.length,
+        fileId: uploaded.fileId,
+      };
+    } catch (err) {
+      console.warn('ImageKit upload fell back to inline image:', err);
     }
   }
 

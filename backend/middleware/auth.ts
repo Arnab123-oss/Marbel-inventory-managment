@@ -1,9 +1,6 @@
 import crypto from 'node:crypto';
 import type {NextFunction, Request, Response} from 'express';
-import {getFirebaseAuth, isFirebaseReady} from '../config/firebase.ts';
-import User from '../models/User.ts';
-import {createDefaultLayout} from '../services/seedService.ts';
-import {computeInitials, getStore, hashPassword, saveStore} from '../services/storeService.ts';
+import {getStore} from '../services/storeService.ts';
 import type {StoredUser} from '../types/inventory.ts';
 
 const RUNTIME_FALLBACK_SECRET = crypto.randomBytes(32).toString('hex');
@@ -106,60 +103,7 @@ export function clearAuthCookies(res: Response): void {
   });
 }
 
-async function resolveFirebaseBearerUser(req: Request): Promise<StoredUser | null> {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
-  if (!isFirebaseReady()) return null;
-
-  const firebaseAuth = getFirebaseAuth();
-  if (!firebaseAuth) return null;
-
-  const idToken = authHeader.slice('Bearer '.length).trim();
-  if (!idToken) return null;
-
-  try {
-    const decoded = await firebaseAuth.verifyIdToken(idToken);
-    let user = User.findByFirebaseUid(decoded.uid);
-    if (!user && decoded.email) {
-      user = User.findByEmail(decoded.email);
-      if (user) {
-        user.firebaseUid = decoded.uid;
-        User.upsert(user);
-        saveStore();
-      }
-    }
-    if (!user) {
-      const displayName =
-        decoded.name?.trim() || decoded.email?.split('@')[0] || 'Marble Operator';
-      const id = `usr-${crypto.randomUUID().slice(0, 8)}`;
-      const {salt, hash} = hashPassword(crypto.randomBytes(16).toString('hex'));
-      const newUser: StoredUser = {
-        id,
-        firebaseUid: decoded.uid,
-        name: displayName,
-        email: (decoded.email || `${decoded.uid}@firebase.local`).toLowerCase(),
-        initials: computeInitials(displayName),
-        role: 'Showroom Manager',
-        facilityScope: 'All 7 Marble Showrooms, Yards & Depots',
-        passwordSalt: salt,
-        passwordHash: hash,
-        createdAt: new Date().toISOString(),
-      };
-      User.upsert(newUser);
-      getStore().layouts[id] = createDefaultLayout();
-      saveStore();
-      user = newUser;
-    }
-    return user;
-  } catch {
-    return null;
-  }
-}
-
 export async function getAuthenticatedUser(req: Request): Promise<StoredUser | null> {
-  const bearerUser = await resolveFirebaseBearerUser(req);
-  if (bearerUser) return bearerUser;
-
   const store = getStore();
   const cookies = parseCookies(req);
   const uid = verifySessionToken(cookies[SESSION_COOKIE]);
@@ -174,7 +118,6 @@ export async function getAuthenticatedUser(req: Request): Promise<StoredUser | n
 
 function isCrossSiteCookieMutation(req: Request): boolean {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return false;
-  if (req.headers.authorization?.startsWith('Bearer ')) return false;
   const origin = req.headers.origin;
   if (!origin) return false;
   try {

@@ -7,6 +7,7 @@ import type {
   PurchaseReturn,
   SalesBill,
   SalesPaymentStatus,
+  SalesReturn,
   SlabLot,
   StockTransfer,
   StoneCategory,
@@ -137,7 +138,7 @@ export const api = {
   uploadImage: async (
     file: File,
     folder: 'products' | 'slabs' = 'products',
-  ): Promise<{url: string; provider: 'firebase-storage' | 'inline-fallback'; path: string}> => {
+  ): Promise<{url: string; provider: 'imagekit' | 'inline-fallback'; path: string}> => {
     const formData = new FormData();
     formData.append('folder', folder);
     formData.append('image', file);
@@ -153,7 +154,7 @@ export const api = {
     if (!res.ok) {
       throw new Error((data as {error?: string}).error || `Image upload failed (${res.status})`);
     }
-    return data as {url: string; provider: 'firebase-storage' | 'inline-fallback'; path: string};
+    return data as {url: string; provider: 'imagekit' | 'inline-fallback'; path: string};
   },
 
   createSlabLot: (payload: {
@@ -276,6 +277,31 @@ export const api = {
   }) =>
     requestJson<{purchaseReturn: PurchaseReturn; snapshot: InventorySnapshot}>(
       '/api/inventory/returns',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    ),
+
+  createSalesReturn: (payload: {
+    returnNo: string;
+    customerName: string;
+    branchName: string;
+    salesBillId?: string;
+    reason: string;
+    notes?: string;
+    dateLabel: string;
+    dateIso?: string;
+    items: Array<{
+      itemCode: string;
+      qty: number;
+      unit: UnitType;
+      amountInr: number;
+      reason?: string;
+    }>;
+  }) =>
+    requestJson<{salesReturn: SalesReturn; snapshot: InventorySnapshot}>(
+      '/api/inventory/sales-returns',
       {
         method: 'POST',
         body: JSON.stringify(payload),

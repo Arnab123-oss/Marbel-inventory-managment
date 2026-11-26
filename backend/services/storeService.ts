@@ -60,7 +60,6 @@ export function sanitizeUser(u: StoredUser): UserProfile {
     initials: u.initials,
     role: u.role,
     facilityScope: u.facilityScope,
-    ...(u.firebaseUid ? {firebaseUid: u.firebaseUid} : {}),
   };
 }
 
@@ -176,6 +175,10 @@ function loadStoreFromDisk(): StoreSchema {
           }
           if (!Array.isArray(parsed.snapshot.purchaseReturns)) {
             parsed.snapshot.purchaseReturns = [];
+            migratedSlabs = true;
+          }
+          if (!Array.isArray(parsed.snapshot.salesReturns)) {
+            parsed.snapshot.salesReturns = [];
             migratedSlabs = true;
           }
           if (migrateUnifiedSlabs(parsed.snapshot)) {

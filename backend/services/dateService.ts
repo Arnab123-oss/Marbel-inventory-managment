@@ -109,6 +109,27 @@ export function formatPurchaseReturnNoServer(
   return `RET-${month}-${year}-${suffix || fallbackSuffix}`;
 }
 
+export function formatSalesReturnNoServer(
+  rawReturnNo: string | undefined,
+  dateIso?: string,
+  dateLabel?: string,
+): string {
+  const resolvedIso =
+    dateIso && /^\d{4}-\d{2}-\d{2}$/.test(dateIso.trim())
+      ? dateIso.trim()
+      : parseDateLabelToIsoServer(dateLabel);
+  const [year, month] = resolvedIso.split('-');
+  const fallbackSuffix = String(Math.floor(3100 + Math.random() * 700));
+  const trimmed = rawReturnNo?.trim() || '';
+  const suffix = trimmed
+    .replace(/^SRET-\d{2}-\d{4}-/i, '')
+    .replace(/^SRET-/i, '')
+    .replace(/^SR-\d{2}-\d{4}-/i, '')
+    .replace(/^SR-/i, '')
+    .trim();
+  return `SRET-${month}-${year}-${suffix || fallbackSuffix}`;
+}
+
 export function formatInvoiceNoServer(rawInvoiceNo?: string): string {
   const fallback = String(Math.floor(8850 + Math.random() * 900));
   const trimmed = rawInvoiceNo?.trim() || '';

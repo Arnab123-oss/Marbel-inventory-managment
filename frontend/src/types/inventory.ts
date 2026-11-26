@@ -246,6 +246,37 @@ export interface PurchaseReturn {
   items: PurchaseReturnItem[];
 }
 
+export interface SalesReturnItem {
+  id: string;
+  itemCode: string;
+  itemName: string;
+  dimensions: string;
+  qty: number;
+  unit: UnitType;
+  amountInr: number;
+  reason?: string;
+}
+
+export interface SalesReturn {
+  id: string;
+  returnNo: string;
+  customerName: string;
+  branchName: string;
+  salesBillId?: string;
+  salesBillNo?: string;
+  affectedBills?: string[];
+  reason: string;
+  notes?: string;
+  itemSummary: string;
+  qty: number;
+  unit: UnitType;
+  totalInr: number;
+  status: 'Completed' | 'Adjusted';
+  dateLabel: string;
+  dateIso?: string;
+  items: SalesReturnItem[];
+}
+
 export type SalesPaymentStatus = 'Paid' | 'Partially Paid' | 'Due';
 
 export interface SalesBillItem {
@@ -338,6 +369,7 @@ export interface InventorySnapshot {
   purchaseBills: PurchaseBill[];
   purchaseReturns?: PurchaseReturn[];
   salesBills: SalesBill[];
+  salesReturns?: SalesReturn[];
   customers: CustomerRecord[];
   suppliers: SupplierRecord[];
   alerts: InventoryAlert[];

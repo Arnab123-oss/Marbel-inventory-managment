@@ -10,6 +10,7 @@ import {ProductDocModel} from '../models/Product.ts';
 import {PurchaseBillDocModel} from '../models/PurchaseBill.ts';
 import {PurchaseReturnDocModel} from '../models/PurchaseReturn.ts';
 import {SalesBillDocModel} from '../models/SalesBill.ts';
+import {SalesReturnDocModel} from '../models/SalesReturn.ts';
 import {SlabDocModel} from '../models/Slab.ts';
 import {SupplierDocModel} from '../models/Supplier.ts';
 import {TransferDocModel} from '../models/Transfer.ts';
@@ -83,6 +84,7 @@ export async function syncStoreToMongo(store: StoreSchema): Promise<void> {
       replaceCollectionDocs(PurchaseBillDocModel, snapshot.purchaseBills),
       replaceCollectionDocs(PurchaseReturnDocModel, snapshot.purchaseReturns || []),
       replaceCollectionDocs(SalesBillDocModel, snapshot.salesBills),
+      replaceCollectionDocs(SalesReturnDocModel, snapshot.salesReturns || []),
       replaceCollectionDocs(CustomerDocModel, snapshot.customers),
       replaceCollectionDocs(SupplierDocModel, snapshot.suppliers),
       replaceCollectionDocs(TransferDocModel, snapshot.transfers),
@@ -115,6 +117,7 @@ export async function hydrateStoreFromMongo(): Promise<void> {
       purchaseBills,
       purchaseReturns,
       salesBills,
+      salesReturns,
       customers,
       suppliers,
       transfers,
@@ -129,6 +132,7 @@ export async function hydrateStoreFromMongo(): Promise<void> {
       PurchaseBillDocModel.find({}).lean(),
       PurchaseReturnDocModel.find({}).lean(),
       SalesBillDocModel.find({}).lean(),
+      SalesReturnDocModel.find({}).lean(),
       CustomerDocModel.find({}).lean(),
       SupplierDocModel.find({}).lean(),
       TransferDocModel.find({}).lean(),
@@ -168,6 +172,7 @@ export async function hydrateStoreFromMongo(): Promise<void> {
       purchaseBills,
       purchaseReturns,
       salesBills,
+      salesReturns,
       customers,
       suppliers,
       transfers,

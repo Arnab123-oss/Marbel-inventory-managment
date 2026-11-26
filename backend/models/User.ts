@@ -14,7 +14,6 @@ export const userSchema = new mongoose.Schema<StoredUser>(
     initials: {type: String, required: true},
     role: {type: String, required: true},
     facilityScope: {type: String, required: true},
-    firebaseUid: {type: String, required: false, index: true},
     enabled: {type: Boolean, default: true},
     passwordSalt: {type: String, required: true},
     passwordHash: {type: String, required: true},
@@ -43,10 +42,6 @@ class UserModel extends MongooseRepositoryBase<StoredUser> {
     return Object.values(getActiveStore().users).find(
       (u) => u.email.toLowerCase() === normalized,
     );
-  }
-
-  findByFirebaseUid(firebaseUid: string): StoredUser | undefined {
-    return Object.values(getActiveStore().users).find((u) => u.firebaseUid === firebaseUid);
   }
 
   upsert(user: StoredUser): StoredUser {

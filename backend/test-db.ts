@@ -14,9 +14,7 @@ async function testDbConnection() {
   console.log('Primary Database Driver:', status.driver);
   console.log('MongoDB Atlas Connected:', status.mongoConnected);
   console.log('MongoDB Host:', status.mongoHost ?? '(MONGODB_URI not configured yet)');
-  console.log('Firebase Auth Ready (optional):', status.firebase.authReady);
-  console.log('Firebase Storage Ready (optional):', status.firebase.storageReady);
-  console.log('Firebase Project ID:', status.firebase.projectId ?? '(not linked yet)');
+  console.log('ImageKit Storage Ready (optional):', status.imagekit.configured);
   console.log('Local ledger fallback path:', status.storePath);
   console.log('Loaded Mongoose/Ledger counts:', {
     users: Object.keys(store.users).length,
@@ -24,7 +22,9 @@ async function testDbConnection() {
     products: Product.findAll().length,
     slabs: Slab.findAll().length,
     purchaseBills: store.snapshot.purchaseBills.length,
+    purchaseReturns: (store.snapshot.purchaseReturns || []).length,
     salesBills: store.snapshot.salesBills.length,
+    salesReturns: (store.snapshot.salesReturns || []).length,
     customers: store.snapshot.customers.length,
     suppliers: store.snapshot.suppliers.length,
   });
